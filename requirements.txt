@@ -1,0 +1,6 @@
+pandas
+pdfplumber
+pypdf
+rapidocr-onnxruntime
+pytest
+streamlit
