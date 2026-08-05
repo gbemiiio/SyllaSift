@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from parser import (
     detect_course_metadata,
+    detect_platform_notices,
     extract_deadline_candidates,
     extract_deadlines,
     extract_ocr_column_deadlines,
@@ -20,6 +21,8 @@ from parser import (
         ("March 20, 2027", 2026, "2027-03-20"),
         ("01/13", 2026, "2026-01-13"),
         ("01/13/26", 2025, "2026-01-13"),
+        ("17 Sep", 2021, "2021-09-17"),
+        ("15 December 2022", 2021, "2022-12-15"),
     ],
 )
 def test_date_normalization(date_text, course_year, expected):
@@ -444,3 +447,105 @@ def test_final_instructional_day_policy_is_not_a_deadline():
     """}]}
 
     assert extract_deadline_candidates(document, 2024) == []
+
+
+def test_day_first_schedule_extracts_only_dated_assessments():
+    document = {"text": "", "pages": [{"page": 9, "tables": [], "text": """
+    Date Lecture Topics Required Reading
+    8 Sep Animals: Invertebrates
+    10 Sep Animals: Vertebrates
+    Scientist Spotlight 1 due by 11:59pm
+    13 Sep The Tree of Life over Geologic Time
+    17 Sep Module 1 Exam
+    6 Oct Mammalian Cardiac Cycle
+    Scientist Spotlight 2 due by 11:59pm
+    18 Oct Module 2 Exam
+    """}]}
+
+    candidates = extract_deadline_candidates(document, 2021)
+
+    assert [
+        (row["Item"], row["Normalized Date"], row["Page"])
+        for row in candidates
+    ] == [
+        ("Scientist Spotlight 1", "2021-09-10", 9),
+        ("Module 1 Exam", "2021-09-17", 9),
+        ("Scientist Spotlight 2", "2021-10-06", 9),
+        ("Module 2 Exam", "2021-10-18", 9),
+    ]
+
+
+def test_assignments_due_column_splits_and_cleans_deliverables():
+    document = {"text": "", "pages": [{"page": 6, "text": "", "tables": [[
+        ["Week", "Lab Schedule", "Assignments due"],
+        [
+            "1 May 12",
+            "Intro to Stats, Lab Safety",
+            (
+                "Pre-lab 1: Animal Behavior\n"
+                "Biosafety/rDNA Training (Due May 16th)\n"
+                "I ntro Stats Assignment Due by end of Lab"
+            ),
+        ],
+        [
+            "3 May 26",
+            "Animal Behavior: Counting Eggs",
+            (
+                "Lab Notebook Check 1 (end of lab)\n"
+                "Lab Group Member Evaluation 1 (Due May 30th)"
+            ),
+        ],
+    ]]}]}
+
+    candidates = extract_deadline_candidates(document, 2026)
+
+    assert [(row["Item"], row["Normalized Date"]) for row in candidates] == [
+        ("Pre-lab 1: Animal Behavior", "2026-05-12"),
+        ("Intro Stats Assignment", "2026-05-12"),
+        ("Biosafety/rDNA Training", "2026-05-16"),
+        ("Lab Notebook Check 1", "2026-05-26"),
+        ("Lab Group Member Evaluation 1", "2026-05-30"),
+    ]
+
+
+def test_course_title_suffixes_are_removed_without_course_specific_rules():
+    assert detect_course_metadata(
+        "BIOS 1108 ORGANISMAL BIOLOGY FALL 2021\nCourse Mode Information:"
+    )["course_name"] == "Organismal Biology"
+    assert detect_course_metadata(
+        "MGT 2250 Syllabus\nManagement Statistics, Section O, 3 Credits\n"
+        "Summer 2026"
+    )["course_name"] == "Management Statistics"
+
+
+def test_platform_notice_names_the_relevant_services():
+    notices = detect_platform_notices(
+        "Homework assignments are posted on the MyLab Statistics website "
+        "and are due by the deadlines specified above. Canvas contains the tests."
+    )
+
+    assert notices == [
+        "Some assignment dates are maintained in Canvas and MyLab Statistics. "
+        "Add them manually when they become available."
+    ]
+
+
+def test_document_wide_candidates_recover_page_provenance():
+    document = {"text": """
+    There will be one in-class midterm exam. You will be tested on March 12.
+    You will submit your agent by 11:59 pm on April 20.
+    """, "pages": [
+        {"page": 3, "tables": [], "source": "text", "text": """
+        Tournament: You will submit your agent by 11:59 pm on April 20.
+        """},
+        {"page": 4, "tables": [], "source": "text", "text": """
+        Midterm exam: You will be tested on March 12.
+        """},
+    ]}
+
+    candidates = extract_deadline_candidates(document, 2026)
+
+    assert [(row["Item"], row["Page"]) for row in candidates] == [
+        ("Midterm Exam", 4),
+        ("Tournament Agent Submission", 3),
+    ]

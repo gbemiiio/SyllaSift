@@ -1,6 +1,7 @@
 pandas
 pdfplumber
 pypdf
+pypdfium2
 rapidocr-onnxruntime
 pytest
 streamlit

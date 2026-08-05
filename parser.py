@@ -31,6 +31,12 @@ DATE_PATTERN = (
     r"|\b\d{1,2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b"
 )
 
+DAY_FIRST_DATE_PATTERN = (
+    r"\b\d{1,2}\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|"
+    r"May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|"
+    r"Nov(?:ember)?|Dec(?:ember)?)\.?(?:\s+\d{4})?\b"
+)
+
 COURSE_CODE_PATTERN = r"\b[A-Z]{2,5}\s*-?\s*\d{3,4}[A-Z]?\b"
 
 TERM_PATTERN = (
@@ -64,6 +70,7 @@ ASSESSMENT_WORDS = [
     "class work",
     "peer review",
     "pitch",
+    "spotlight",
 ]
 
 
@@ -227,22 +234,7 @@ def extract_pdf_document(uploaded_file):
             )
 
     combined_text = "\n".join(page["text"] for page in pages)
-    notices = []
-    lowered = combined_text.lower()
-    if (
-        "due dates will be announced" in lowered
-        or "assignment due dates" in lowered and "canvas" in lowered
-        or "see course assignments for additional instructions" in lowered
-        or "due dates are posted" in lowered and "webwork" in lowered
-        or "learningcurve assignments" in lowered and "canvas" in lowered
-        or "learningcurve assignments" in lowered and "launchpad" in lowered
-        or "living schedule is linked in canvas" in lowered
-        or "graded projects" in lowered and "about one per week" in lowered
-    ):
-        notices.append(
-            "Some required work has dates or instructions only in Canvas. "
-            "Add those deadlines manually when they become available."
-        )
+    notices = detect_platform_notices(combined_text)
 
     return {
         "text": combined_text,
@@ -254,6 +246,58 @@ def extract_pdf_document(uploaded_file):
 def extract_pdf_text(uploaded_file):
     """Backward-compatible text-only PDF extraction helper."""
     return extract_pdf_document(uploaded_file)["text"]
+
+
+def detect_platform_notices(text):
+    """Describe dated work maintained on a course platform, without guessing dates."""
+    compact = re.sub(r"\s+", " ", text).lower()
+    signals = (
+        "due dates will be announced",
+        "assignment due dates",
+        "date provided in the canvas assignment",
+        "dates are posted",
+        "deadlines specified above",
+        "posted deadline",
+        "living schedule is linked",
+        "see course assignments for additional instructions",
+        "about one per week",
+    )
+    recurring_platform_work = bool(
+        re.search(
+            r"(?:weekly\s+homework|homework assignments?).{0,100}"
+            r"(?:canvas|learning catalytics|webwork|mylab|mystatlab|launchpad)",
+            compact,
+        )
+    )
+    if not recurring_platform_work and not any(signal in compact for signal in signals):
+        return []
+
+    platform_patterns = (
+        ("Canvas", r"\bcanvas\b"),
+        ("Gradescope", r"\bgradescope\b"),
+        ("WeBWorK", r"\bwebwork\b"),
+        ("MyLab Statistics", r"\b(?:mylab statistics|mystatlab)\b"),
+        ("Learning Catalytics", r"\blearning catalytics\b"),
+        ("LaunchPad", r"\blaunchpad\b"),
+    )
+    platforms = [
+        label
+        for label, pattern in platform_patterns
+        if re.search(pattern, compact, re.IGNORECASE)
+    ]
+    location = format_readable_list(platforms) if platforms else "the course platform"
+    return [
+        f"Some assignment dates are maintained in {location}. "
+        "Add them manually when they become available."
+    ]
+
+
+def format_readable_list(values):
+    if len(values) < 2:
+        return values[0] if values else ""
+    if len(values) == 2:
+        return f"{values[0]} and {values[1]}"
+    return f"{', '.join(values[:-1])}, and {values[-1]}"
 
 
 def normalize_course_code(course_code):
@@ -320,8 +364,33 @@ def clean_course_title(title):
         flags=re.IGNORECASE,
     )
     title = re.sub(r"\(\s*\)", "", title)
+    title = re.sub(
+        r"\bCourse\s+Mode\s+Information\b.*$",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+    title = re.sub(
+        r",?\s*Section\s+[A-Z0-9-]+"
+        r"(?:\s*,\s*\d+\s*Credits?)?\s*,?$",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+    title = re.sub(
+        r",?\s*\d+\s*Credits?\s*,?$",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
 
-    return re.sub(r"\s+", " ", title).strip()
+    title = re.sub(r"\s+", " ", title).strip(" ,:;-–—|")
+    if title.isupper():
+        title = " ".join(
+            word if len(re.sub(r"[^A-Z]", "", word)) <= 3 else word.title()
+            for word in title.split()
+        )
+    return title
 
 
 def looks_like_course_title(line):
@@ -348,6 +417,7 @@ def looks_like_course_title(line):
         "college",
         "meeting time",
         "meeting times",
+        "course mode information",
     ]
 
     if any(word in lowered for word in rejected_words):
@@ -500,15 +570,20 @@ def normalize_date(date_text, course_year):
     date_text = date_text.strip().strip(".,;:")
 
     day_month_match = re.fullmatch(
-        r"(\d{1,2})-([A-Za-z]{3})",
+        r"(\d{1,2})[\s-]+([A-Za-z]{3,9})\.?(?:\s+(\d{4}))?",
         date_text,
     )
 
     if day_month_match:
-        parsed_date = datetime.strptime(
-            f"{day_month_match.group(1)}-{day_month_match.group(2)}-{course_year}",
-            "%d-%b-%Y",
+        year = day_month_match.group(3) or str(course_year)
+        date_value = (
+            f"{day_month_match.group(1)} "
+            f"{day_month_match.group(2)} {year}"
         )
+        try:
+            parsed_date = datetime.strptime(date_value, "%d %b %Y")
+        except ValueError:
+            parsed_date = datetime.strptime(date_value, "%d %B %Y")
 
     elif date_text.count("/") == 2:
         month, day, year = date_text.split("/")
@@ -1081,6 +1156,153 @@ def extract_document_requirement_candidates(text, course_year):
     return rows
 
 
+def clean_assignment_due_item(text, raw_date=""):
+    """Clean one entry from an authoritative Assignments Due column."""
+    item = re.sub(r"\b([IL])\s+(?=[a-z])", r"\1", text.strip())
+    if raw_date:
+        item = item.replace(raw_date, " ")
+    item = re.sub(
+        r"\(\s*Due\s+[^)]*\)",
+        " ",
+        item,
+        flags=re.IGNORECASE,
+    )
+    item = re.sub(
+        r"\(\s*end\s+of\s+(?:the\s+)?lab\s*\)",
+        " ",
+        item,
+        flags=re.IGNORECASE,
+    )
+    item = re.sub(
+        r"\s+Due\s+by\s+end\s+of\s+(?:the\s+)?Lab\b.*$",
+        "",
+        item,
+        flags=re.IGNORECASE,
+    )
+    item = re.sub(r"\bDue\b", " ", item, flags=re.IGNORECASE)
+    item = re.sub(
+        r"\bby\s+\d{1,2}(?::\d{2})?\s*(?:AM|PM)\b.*$",
+        "",
+        item,
+        flags=re.IGNORECASE,
+    )
+    item = re.sub(r"\s*[–—-]\s*$", "", item)
+    item = re.sub(r"\s*([–—])\s*", r" \1 ", item)
+    return re.sub(r"\s+", " ", item).strip(" .,:;-–—")
+
+
+def extract_assignment_due_table_deadlines(tables, course_year):
+    """Split each deliverable in an Assignments Due table into its own row."""
+    deadlines = []
+    seen = set()
+
+    for table in tables:
+        if not table or not table[0]:
+            continue
+        headers = [str(cell or "").strip().lower() for cell in table[0]]
+        due_indexes = [
+            index
+            for index, header in enumerate(headers)
+            if "assignment" in header and "due" in header
+        ]
+        if not due_indexes:
+            continue
+
+        due_index = due_indexes[0]
+        for row in table[1:]:
+            row = row or []
+            if due_index >= len(row) or not row[due_index]:
+                continue
+
+            row_date = ""
+            for index, cell in enumerate(row):
+                if index == due_index or not cell:
+                    continue
+                date_match = re.search(DATE_PATTERN, str(cell), re.IGNORECASE)
+                if date_match:
+                    row_date = date_match.group()
+                    break
+            if not row_date:
+                continue
+
+            for entry in get_lines(str(row[due_index])):
+                if line_is_excluded(entry):
+                    continue
+                explicit_date = re.search(DATE_PATTERN, entry, re.IGNORECASE)
+                raw_date = explicit_date.group() if explicit_date else row_date
+                item = clean_assignment_due_item(entry, raw_date)
+                if not item:
+                    continue
+                append_deadline(
+                    deadlines,
+                    seen,
+                    item,
+                    raw_date,
+                    course_year,
+                )
+
+    return deadlines
+
+
+def extract_day_first_schedule_deadlines(text, course_year):
+    """Read schedules whose rows begin with dates such as `17 Sep`."""
+    lines = get_lines(text)
+    date_starts = [
+        re.match(
+            rf"^({DAY_FIRST_DATE_PATTERN})\s+(?!\d{{1,2}}\b)",
+            line,
+            re.IGNORECASE,
+        )
+        for line in lines
+    ]
+    if sum(match is not None for match in date_starts) < 3:
+        return []
+
+    deadlines = []
+    seen = set()
+    current_date = ""
+
+    for line in lines:
+        date_match = re.match(
+            rf"^({DAY_FIRST_DATE_PATTERN})\s+(?!\d{{1,2}}\b)(.*)$",
+            line,
+            re.IGNORECASE,
+        )
+        content = line
+        if date_match:
+            current_date = date_match.group(1)
+            content = date_match.group(2)
+        if not current_date or line_is_excluded(content):
+            continue
+
+        module_exam = re.search(r"\bModule\s+(\d+)\s+Exam\b", content, re.IGNORECASE)
+        if module_exam:
+            item = f"Module {module_exam.group(1)} Exam"
+        elif re.search(r"\bFinal\s+Comprehensive\b", content, re.IGNORECASE):
+            item = "Final Exam"
+        else:
+            due_match = re.search(
+                r"\b(?:is\s+)?due(?:\s+by)?\b",
+                content,
+                re.IGNORECASE,
+            )
+            if not due_match:
+                continue
+            item = clean_explicit_item(content[:due_match.start()])
+            if not line_looks_like_assessment(item):
+                continue
+
+        append_deadline(
+            deadlines,
+            seen,
+            item,
+            current_date,
+            course_year,
+        )
+
+    return deadlines
+
+
 def extract_table_deadlines(tables, course_year):
     deadlines = []
     seen = set()
@@ -1508,6 +1730,44 @@ def candidate_item_tokens(item):
     }
 
 
+def locate_candidate_source(row, pages, course_year):
+    """Find the page containing a document-wide candidate's date and item terms."""
+    target_date = row["Normalized Date"]
+    item_tokens = {
+        token
+        for token in candidate_item_tokens(row["Item"])
+        if len(token) >= 4
+    }
+    best_match = None
+
+    for page in pages:
+        page_text = page.get("text", "")
+        page_dates = set()
+        for date_match in re.finditer(DATE_PATTERN, page_text, re.IGNORECASE):
+            try:
+                page_dates.add(normalize_date(date_match.group(), course_year))
+            except ValueError:
+                continue
+        if target_date not in page_dates:
+            continue
+
+        lowered = page_text.lower()
+        score = 10 + sum(token in lowered for token in item_tokens)
+        raw_date = str(row.get("Date", "")).lower()
+        if raw_date and raw_date in lowered:
+            score += 2
+        if best_match is None or score > best_match[0]:
+            best_match = (
+                score,
+                page.get("page"),
+                page.get("source", "text").upper(),
+            )
+
+    if best_match:
+        return best_match[1], best_match[2]
+    return None, "TEXT"
+
+
 def candidate_is_duplicate(candidates, row):
     row_tokens = candidate_item_tokens(row["Item"])
 
@@ -1545,6 +1805,7 @@ def candidate_item_is_excluded(item):
 
 def clean_candidate_label(item):
     item = clean_explicit_item(item)
+    item = re.sub(r"\s*[–—]\s*", " - ", item)
     item = re.sub(r"^[MTWRF](?=\s+(?:Exam|Optional Final))\s+", "", item)
     item = re.sub(r"^\d+\.\s*", "", item)
     item = re.sub(
@@ -1660,10 +1921,16 @@ def extract_deadline_candidates(document, course_year):
     for page_position, page in enumerate(pages):
         page_number = page.get("page")
         tables = page.get("tables", [])
+        assignment_due_deadlines = extract_assignment_due_table_deadlines(
+            tables,
+            course_year,
+        )
         table_deadlines = extract_table_deadlines(
             tables,
             course_year,
         )
+        if assignment_due_deadlines:
+            table_deadlines = []
         calendar_deadlines = extract_calendar_table_deadlines(
             calendar_tables_by_page.get(page_position, tables),
             course_year,
@@ -1695,14 +1962,23 @@ def extract_deadline_candidates(document, course_year):
         whitespace_schedule = extract_whitespace_schedule_candidates(
             page.get("text", ""), course_year,
         )
+        dated_schedule = extract_day_first_schedule_deadlines(
+            page.get("text", ""), course_year,
+        )
 
-        if calendar_deadlines or ocr_deadlines:
+        if assignment_due_deadlines:
+            due_deadlines = []
+            ordinary_deadlines = []
+        elif calendar_deadlines or ocr_deadlines:
             due_deadlines = []
             ordinary_deadlines = []
         elif table_deadlines:
             due_deadlines = []
             ordinary_deadlines = []
         elif release_due_deadlines:
+            due_deadlines = []
+            ordinary_deadlines = []
+        elif dated_schedule:
             due_deadlines = []
             ordinary_deadlines = []
         else:
@@ -1725,8 +2001,10 @@ def extract_deadline_candidates(document, course_year):
             + scheduled_deadlines
             + section_finals
             + whitespace_schedule
+            + dated_schedule
             + authoritative_finals
             + due_deadlines
+            + assignment_due_deadlines
             + table_deadlines
         )
         explicit_keys = {
@@ -1812,11 +2090,16 @@ def extract_deadline_candidates(document, course_year):
                 if candidate not in duplicate_candidates
             ]
         candidate = dict(row)
+        page_number, source = locate_candidate_source(
+            row,
+            pages,
+            course_year,
+        )
         candidate.update({
             "Confidence": row.get("_confidence", "High"),
             "Reason": row.get("_reason", "Explicit due date"),
-            "Page": None,
-            "Source": "TEXT",
+            "Page": page_number,
+            "Source": source,
             "Include": row.get("_include", True),
         })
         for internal_key in ("_confidence", "_reason", "_include"):
@@ -1827,12 +2110,17 @@ def extract_deadline_candidates(document, course_year):
         if candidate_is_duplicate(candidates, row):
             continue
         candidate = dict(row)
+        page_number, source = locate_candidate_source(
+            row,
+            pages,
+            course_year,
+        )
         candidate.update(
             {
                 "Confidence": "High",
                 "Reason": "Due on corresponding exam date",
-                "Page": None,
-                "Source": "TEXT",
+                "Page": page_number,
+                "Source": source,
                 "Include": True,
             }
         )

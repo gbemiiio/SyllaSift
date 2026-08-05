@@ -84,9 +84,11 @@ def save_deadlines(course_id, table_rows):
                 course_id,
                 item,
                 raw_date,
-                due_date
+                due_date,
+                is_completed,
+                completed_at
             )
-            VALUES (?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, 0, NULL)
             """,
             (
                 course_id,
@@ -117,6 +119,78 @@ def get_course_options():
     connection.close()
 
     return courses
+
+
+def get_courses_for_export():
+    """Return saved courses with enough metadata for clear export labels."""
+    connection = get_connection()
+    cursor = connection.cursor()
+    cursor.execute(
+        """
+        SELECT course_id, course_name, course_code, semester, year
+        FROM courses
+        ORDER BY year, semester, course_code, course_name
+        """
+    )
+    courses = [
+        {
+            "course_id": row[0],
+            "course_name": row[1],
+            "course_code": row[2],
+            "semester": row[3],
+            "year": row[4],
+        }
+        for row in cursor.fetchall()
+    ]
+    connection.close()
+    return courses
+
+
+def get_deadlines_for_export(course_ids):
+    """Return incomplete deadlines for the selected saved courses."""
+    if not course_ids:
+        return []
+
+    normalized_ids = [int(course_id) for course_id in course_ids]
+    placeholders = ", ".join("?" for _ in normalized_ids)
+    connection = get_connection()
+    cursor = connection.cursor()
+    cursor.execute(
+        f"""
+        SELECT
+            d.deadline_id,
+            c.course_id,
+            c.course_name,
+            c.course_code,
+            c.semester,
+            c.year,
+            d.item,
+            d.due_date,
+            d.is_completed
+        FROM deadlines AS d
+        JOIN courses AS c ON c.course_id = d.course_id
+        WHERE c.course_id IN ({placeholders})
+          AND d.is_completed = 0
+        ORDER BY d.due_date, c.course_code, c.course_name, d.item
+        """,
+        normalized_ids,
+    )
+    deadlines = [
+        {
+            "deadline_id": row[0],
+            "course_id": row[1],
+            "course_name": row[2],
+            "course_code": row[3],
+            "semester": row[4],
+            "year": row[5],
+            "item": row[6],
+            "due_date": row[7],
+            "is_completed": bool(row[8]),
+        }
+        for row in cursor.fetchall()
+    ]
+    connection.close()
+    return deadlines
 
 
 def get_deadlines(course_id):
