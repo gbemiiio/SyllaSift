@@ -549,3 +549,30 @@ def test_document_wide_candidates_recover_page_provenance():
         ("Midterm Exam", 4),
         ("Tournament Agent Submission", 3),
     ]
+
+
+def test_cs3600_deadlines_keep_all_source_pages():
+    page_three = """
+    Tournament: You will submit your agent by 11:59 pm on April 20.
+    The final tournament will be run on April 21 and 22.
+    """
+    page_four = """
+    Midterm exam: 15%
+    There will be one in-class midterm exam. You will be tested on March 12.
+    Final: 25%
+    There will be a cumulative final on Thursday, April 30 from 6:00 to 8:50 pm.
+    """
+    document = {
+        "text": f"{page_three}\n{page_four}",
+        "pages": [
+            {"page": 3, "tables": [], "source": "text", "text": page_three},
+            {"page": 4, "tables": [], "source": "text", "text": page_four},
+        ],
+    }
+
+    candidates = extract_deadline_candidates(document, 2026)
+
+    pages_by_item = {row["Item"]: row["Page"] for row in candidates}
+    assert pages_by_item["Midterm Exam"] == 4
+    assert pages_by_item["Tournament Agent Submission"] == 3
+    assert pages_by_item["Final Exam"] == 4
