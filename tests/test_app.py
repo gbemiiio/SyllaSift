@@ -58,6 +58,19 @@ def test_current_widget_interaction_is_not_overwritten():
     assert state["deadline_42"] is True
 
 
+def test_saved_value_restores_checkbox_after_course_was_hidden():
+    state = {"deadline_42_saved_value": True}
+
+    widget_key, sync_key = synchronize_deadline_widget_state(
+        state,
+        deadline_id=42,
+        is_completed=True,
+    )
+
+    assert state[widget_key] is True
+    assert state[sync_key] is True
+
+
 def test_import_reset_clears_deadline_and_export_widgets_only():
     state = {
         "deadline_42": True,

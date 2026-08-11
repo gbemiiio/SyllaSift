@@ -97,3 +97,72 @@ def test_subset_import_removes_only_successfully_imported_previews(
     assert [name for _, name in database.get_course_options()] == [
         "Course one", "Course three",
     ]
+
+
+def test_completion_persists_when_switching_saved_courses(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DATABASE_NAME", str(tmp_path / "app.db"))
+    database.initialize_database()
+    first_course = database.save_course(
+        "Course One", "ONE 1000", "Fall", 2026,
+    )
+    second_course = database.save_course(
+        "Course Two", "TWO 2000", "Fall", 2026,
+    )
+    database.save_deadlines(first_course, [{
+        "Item": "First Task",
+        "Date": "September 1",
+        "Normalized Date": "2026-09-01",
+    }])
+    database.save_deadlines(second_course, [{
+        "Item": "Second Task",
+        "Date": "September 2",
+        "Normalized Date": "2026-09-02",
+    }])
+
+    app = AppTest.from_file("app.py").run(timeout=30)
+    first_checkbox = next(
+        checkbox for checkbox in app.checkbox
+        if checkbox.label.startswith("First Task")
+    )
+
+    first_checkbox.check().run(timeout=30)
+    completed_row = database.get_deadlines(first_course)[0]
+    assert completed_row[5] == 1
+    assert completed_row[7] is not None
+    assert database.get_dashboard_stats() == (2, 2, 1)
+
+    next(
+        selectbox for selectbox in app.selectbox
+        if selectbox.label == "Choose a course"
+    ).select("Course Two").run(timeout=30)
+    next(
+        selectbox for selectbox in app.selectbox
+        if selectbox.label == "Choose a course"
+    ).select("Course One").run(timeout=30)
+
+    first_checkbox = next(
+        checkbox for checkbox in app.checkbox
+        if checkbox.label.startswith("First Task")
+    )
+    assert first_checkbox.value is True
+    assert database.get_deadlines(first_course)[0][5] == 1
+
+    first_checkbox.uncheck().run(timeout=30)
+    next(
+        selectbox for selectbox in app.selectbox
+        if selectbox.label == "Choose a course"
+    ).select("Course Two").run(timeout=30)
+    next(
+        selectbox for selectbox in app.selectbox
+        if selectbox.label == "Choose a course"
+    ).select("Course One").run(timeout=30)
+
+    first_checkbox = next(
+        checkbox for checkbox in app.checkbox
+        if checkbox.label.startswith("First Task")
+    )
+    incomplete_row = database.get_deadlines(first_course)[0]
+    assert first_checkbox.value is False
+    assert incomplete_row[5] == 0
+    assert incomplete_row[7] is None
+    assert database.get_dashboard_stats() == (2, 2, 0)

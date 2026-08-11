@@ -9,7 +9,10 @@ def synchronize_deadline_widget_state(
 ) -> tuple[str, str]:
     widget_key = f"deadline_{deadline_id}"
     sync_key = f"{widget_key}_saved_value"
-    if session_state.get(sync_key) != is_completed:
+    if (
+        widget_key not in session_state
+        or session_state.get(sync_key) != is_completed
+    ):
         session_state[widget_key] = is_completed
         session_state[sync_key] = is_completed
     return widget_key, sync_key

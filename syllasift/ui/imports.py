@@ -248,8 +248,11 @@ def display_pdf_import() -> None:
         key=uploader_widget_key(st.session_state),
     )
     pending = get_pending_syllabi(st.session_state)
-    analyze_column, clear_column = st.columns([1, 1])
-    if analyze_column.button(
+    action_row = st.container(
+        horizontal=True,
+        horizontal_alignment="distribute",
+    )
+    if action_row.button(
         "Analyze uploaded syllabi", disabled=not uploaded_files,
     ):
         with st.spinner("Reading syllabi..."):
@@ -259,7 +262,7 @@ def display_pdf_import() -> None:
         advance_uploader_generation(st.session_state)
         st.rerun()
 
-    if clear_column.button(
+    if action_row.button(
         "Clear all uploaded syllabi",
         disabled=not uploaded_files and not pending,
     ):
