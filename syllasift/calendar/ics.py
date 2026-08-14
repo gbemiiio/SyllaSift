@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta, timezone
+import uuid
 
 
 def escape_ics_text(value):
@@ -52,7 +53,7 @@ def build_ics_calendar(deadlines, generated_at=None):
         "METHOD:PUBLISH",
         "X-WR-CALNAME:SyllaSift Deadlines",
     ]
-    for deadline in deadlines:
+    for index, deadline in enumerate(deadlines):
         due_date = parse_due_date(deadline["due_date"])
         end_date = due_date + timedelta(days=1)
         course_label = deadline.get("course_code") or deadline["course_name"]
@@ -61,10 +62,23 @@ def build_ics_calendar(deadlines, generated_at=None):
             f"Course: {deadline['course_name']}\n"
             f"Term: {deadline['semester']} {deadline['year']}"
         )
-        uid = (
-            f"course-{deadline['course_id']}-deadline-"
-            f"{deadline['deadline_id']}@syllasift.local"
-        )
+        if deadline.get("event_uid"):
+            uid = str(deadline["event_uid"])
+        elif deadline.get("course_id") is not None and deadline.get(
+            "deadline_id"
+        ) is not None:
+            uid = (
+                f"course-{deadline['course_id']}-deadline-"
+                f"{deadline['deadline_id']}@syllasift.local"
+            )
+        else:
+            identity = "|".join([
+                str(deadline.get("course_code") or deadline["course_name"]),
+                str(deadline["item"]),
+                str(deadline["due_date"]),
+                str(index),
+            ])
+            uid = f"guest-{uuid.uuid5(uuid.NAMESPACE_URL, identity)}@syllasift.local"
         lines.extend([
             "BEGIN:VEVENT",
             f"UID:{uid}",

@@ -1,5 +1,6 @@
 import streamlit as st
 
+from syllasift.auth import display_authentication
 from syllasift.state.reload_guard import render_reload_guard
 from syllasift.state.uploads import has_unsaved_work, uploader_widget_key
 from syllasift.storage.database import initialize_database
@@ -16,17 +17,26 @@ def main() -> None:
     st.caption(
         "Upload syllabus PDFs, extract deadlines, and track course progress."
     )
+    user = display_authentication()
 
-    display_dashboard()
-    st.divider()
-    display_pdf_import()
-    display_manual_import()
-    st.divider()
-    display_saved_courses()
-    st.divider()
-    display_calendar_export()
-    st.divider()
-    display_clear_saved_data()
+    if user.is_authenticated:
+        display_dashboard(user.user_id)
+        st.divider()
+    else:
+        st.info(
+            "You can extract and export deadlines as a guest. "
+            "Sign in before importing if you want to save courses and progress."
+        )
+
+    display_pdf_import(user)
+    display_manual_import(user)
+    if user.is_authenticated:
+        st.divider()
+        display_saved_courses(user.user_id)
+        st.divider()
+        display_calendar_export(user.user_id)
+        st.divider()
+        display_clear_saved_data(user.user_id)
 
     current_uploads = st.session_state.get(
         uploader_widget_key(st.session_state), []

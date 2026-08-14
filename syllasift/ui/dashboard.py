@@ -3,8 +3,8 @@ import streamlit as st
 from syllasift.storage.database import get_dashboard_stats
 
 
-def display_dashboard() -> None:
-    total_courses, total_deadlines, completed = get_dashboard_stats()
+def display_dashboard(user_id: str) -> None:
+    total_courses, total_deadlines, completed = get_dashboard_stats(user_id)
     remaining = total_deadlines - completed
     st.subheader("Dashboard")
     columns = st.columns(4)

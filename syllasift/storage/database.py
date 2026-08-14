@@ -1,31 +1,60 @@
 import sqlite3
+import uuid
 
 
 DATABASE_NAME = "SyllaSift.db"
+SCHEMA_VERSION = 1
 
 
 def get_connection():
-    return sqlite3.connect(DATABASE_NAME)
+    connection = sqlite3.connect(DATABASE_NAME)
+    connection.execute("PRAGMA foreign_keys = ON")
+    return connection
 
 
-def initialize_database():
-    connection = get_connection()
-    cursor = connection.cursor()
-    cursor.execute(
+def _table_exists(connection, table_name):
+    return connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone() is not None
+
+
+def _column_names(connection, table_name):
+    return {
+        row[1] for row in connection.execute(f"PRAGMA table_info({table_name})")
+    }
+
+
+def _create_schema(connection):
+    connection.execute(
         """
-        CREATE TABLE IF NOT EXISTS courses (
-            course_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            course_name TEXT NOT NULL,
-            course_code TEXT,
-            semester TEXT NOT NULL,
-            year INTEGER NOT NULL
+        CREATE TABLE IF NOT EXISTS users (
+            user_id TEXT PRIMARY KEY,
+            auth_subject TEXT NOT NULL UNIQUE,
+            email TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
-    cursor.execute(
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS courses (
+            course_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
+            course_name TEXT NOT NULL,
+            course_code TEXT,
+            semester TEXT NOT NULL,
+            year INTEGER NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+            UNIQUE (course_id, user_id)
+        )
+        """
+    )
+    connection.execute(
         """
         CREATE TABLE IF NOT EXISTS deadlines (
             deadline_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
             course_id INTEGER NOT NULL,
             item TEXT NOT NULL,
             raw_date TEXT,
@@ -33,202 +62,432 @@ def initialize_database():
             is_completed INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             completed_at TEXT,
-            FOREIGN KEY (course_id) REFERENCES courses(course_id)
+            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+            FOREIGN KEY (course_id, user_id)
+                REFERENCES courses(course_id, user_id) ON DELETE CASCADE
         )
         """
     )
-    connection.commit()
-    connection.close()
-
-
-def save_course(course_name, course_code, semester, year):
-    connection = get_connection()
-    cursor = connection.cursor()
-    cursor.execute(
-        """
-        INSERT INTO courses (course_name, course_code, semester, year)
-        VALUES (?, ?, ?, ?)
-        """,
-        (course_name, course_code, semester, year),
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_courses_user_id ON courses(user_id)"
     )
-    course_id = cursor.lastrowid
-    connection.commit()
-    connection.close()
-    return course_id
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_deadlines_user_course
+        ON deadlines(user_id, course_id)
+        """
+    )
 
 
-def save_deadlines(course_id, table_rows):
-    connection = get_connection()
-    cursor = connection.cursor()
-    for row in table_rows:
-        cursor.execute(
+def _create_ownership_triggers(connection):
+    # Ownership columns stay nullable only so preserved legacy rows can exist.
+    statements = (
+        """
+        CREATE TRIGGER IF NOT EXISTS courses_require_owner
+        BEFORE INSERT ON courses
+        WHEN NEW.user_id IS NULL
+        BEGIN
+            SELECT RAISE(ABORT, 'courses require an owner');
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS courses_owner_is_immutable
+        BEFORE UPDATE OF user_id ON courses
+        WHEN NEW.user_id IS NOT OLD.user_id
+        BEGIN
+            SELECT RAISE(ABORT, 'course ownership is immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS deadlines_require_owner
+        BEFORE INSERT ON deadlines
+        WHEN NEW.user_id IS NULL
+        BEGIN
+            SELECT RAISE(ABORT, 'deadlines require an owner');
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS deadlines_owner_is_immutable
+        BEFORE UPDATE OF user_id ON deadlines
+        WHEN NEW.user_id IS NOT OLD.user_id
+        BEGIN
+            SELECT RAISE(ABORT, 'deadline ownership is immutable');
+        END
+        """,
+    )
+    for statement in statements:
+        connection.execute(statement)
+
+
+def _migrate_legacy_schema(connection):
+    has_courses = _table_exists(connection, "courses")
+    has_deadlines = _table_exists(connection, "deadlines")
+    courses_are_legacy = has_courses and "user_id" not in _column_names(
+        connection, "courses"
+    )
+    deadlines_are_legacy = has_deadlines and "user_id" not in _column_names(
+        connection, "deadlines"
+    )
+
+    if not courses_are_legacy and not deadlines_are_legacy:
+        _create_schema(connection)
+        return
+
+    if deadlines_are_legacy:
+        connection.execute("ALTER TABLE deadlines RENAME TO deadlines_legacy")
+    if courses_are_legacy:
+        connection.execute("ALTER TABLE courses RENAME TO courses_legacy")
+
+    _create_schema(connection)
+    if courses_are_legacy:
+        connection.execute(
+            """
+            INSERT INTO courses (
+                course_id, user_id, course_name, course_code, semester, year
+            )
+            SELECT course_id, NULL, course_name, course_code, semester, year
+            FROM courses_legacy
+            """
+        )
+    if deadlines_are_legacy:
+        connection.execute(
             """
             INSERT INTO deadlines (
-                course_id, item, raw_date, due_date, is_completed, completed_at
+                deadline_id, user_id, course_id, item, raw_date, due_date,
+                is_completed, created_at, completed_at
             )
-            VALUES (?, ?, ?, ?, 0, NULL)
-            """,
-            (
-                course_id,
-                row["Item"],
-                row["Date"],
-                row["Normalized Date"],
-            ),
+            SELECT deadline_id, NULL, course_id, item, raw_date, due_date,
+                   is_completed, created_at, completed_at
+            FROM deadlines_legacy
+            """
         )
-    connection.commit()
-    connection.close()
+        connection.execute("DROP TABLE deadlines_legacy")
+    if courses_are_legacy:
+        connection.execute("DROP TABLE courses_legacy")
 
 
-def get_course_options():
+def initialize_database():
     connection = get_connection()
-    cursor = connection.cursor()
-    cursor.execute(
-        "SELECT course_id, course_name FROM courses ORDER BY course_name"
-    )
-    courses = cursor.fetchall()
-    connection.close()
-    return courses
+    try:
+        # Serialize first-run schema migrations across Streamlit sessions.
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute("BEGIN IMMEDIATE")
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        if version > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"Database schema version {version} is newer than this app supports."
+            )
+        if version < SCHEMA_VERSION:
+            _migrate_legacy_schema(connection)
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        else:
+            _create_schema(connection)
+        _create_ownership_triggers(connection)
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.close()
 
 
-def get_courses_for_export():
+def _require_user_id(user_id):
+    if not str(user_id or "").strip():
+        raise ValueError("An authenticated user ID is required.")
+
+
+def get_or_create_user(auth_subject, email=None):
+    subject = str(auth_subject or "").strip()
+    if not subject:
+        raise ValueError("An authenticated subject is required.")
+
     connection = get_connection()
-    cursor = connection.cursor()
-    cursor.execute(
-        """
-        SELECT course_id, course_name, course_code, semester, year
-        FROM courses
-        ORDER BY year, semester, course_code, course_name
-        """
-    )
-    courses = [
-        {
-            "course_id": row[0],
-            "course_name": row[1],
-            "course_code": row[2],
-            "semester": row[3],
-            "year": row[4],
-        }
-        for row in cursor.fetchall()
-    ]
-    connection.close()
-    return courses
+    try:
+        row = connection.execute(
+            "SELECT user_id FROM users WHERE auth_subject = ?", (subject,)
+        ).fetchone()
+        if row:
+            if email:
+                connection.execute(
+                    "UPDATE users SET email = ? WHERE user_id = ?",
+                    (str(email), row[0]),
+                )
+                connection.commit()
+            return row[0]
+
+        user_id = str(uuid.uuid4())
+        try:
+            connection.execute(
+                """
+                INSERT INTO users (user_id, auth_subject, email)
+                VALUES (?, ?, ?)
+                """,
+                (user_id, subject, str(email) if email else None),
+            )
+            connection.commit()
+            return user_id
+        except sqlite3.IntegrityError:
+            row = connection.execute(
+                "SELECT user_id FROM users WHERE auth_subject = ?", (subject,)
+            ).fetchone()
+            if row:
+                return row[0]
+            raise
+    finally:
+        connection.close()
 
 
-def get_deadlines_for_export(course_ids):
+def save_course(user_id, course_name, course_code, semester, year):
+    _require_user_id(user_id)
+    connection = get_connection()
+    try:
+        cursor = connection.execute(
+            """
+            INSERT INTO courses (
+                user_id, course_name, course_code, semester, year
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user_id, course_name, course_code, semester, year),
+        )
+        course_id = cursor.lastrowid
+        connection.commit()
+        return course_id
+    finally:
+        connection.close()
+
+
+def save_deadlines(user_id, course_id, table_rows):
+    _require_user_id(user_id)
+    connection = get_connection()
+    try:
+        owned_course = connection.execute(
+            "SELECT 1 FROM courses WHERE course_id = ? AND user_id = ?",
+            (course_id, user_id),
+        ).fetchone()
+        if not owned_course:
+            raise ValueError("Course not found.")
+
+        connection.executemany(
+            """
+            INSERT INTO deadlines (
+                user_id, course_id, item, raw_date, due_date,
+                is_completed, completed_at
+            )
+            VALUES (?, ?, ?, ?, ?, 0, NULL)
+            """,
+            [
+                (
+                    user_id,
+                    course_id,
+                    row["Item"],
+                    row["Date"],
+                    row["Normalized Date"],
+                )
+                for row in table_rows
+            ],
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def get_course_options(user_id):
+    _require_user_id(user_id)
+    connection = get_connection()
+    try:
+        return connection.execute(
+            """
+            SELECT course_id, course_name
+            FROM courses
+            WHERE user_id = ?
+            ORDER BY course_name
+            """,
+            (user_id,),
+        ).fetchall()
+    finally:
+        connection.close()
+
+
+def get_courses_for_export(user_id):
+    _require_user_id(user_id)
+    connection = get_connection()
+    try:
+        rows = connection.execute(
+            """
+            SELECT course_id, course_name, course_code, semester, year
+            FROM courses
+            WHERE user_id = ?
+            ORDER BY year, semester, course_code, course_name
+            """,
+            (user_id,),
+        ).fetchall()
+        return [
+            {
+                "course_id": row[0],
+                "course_name": row[1],
+                "course_code": row[2],
+                "semester": row[3],
+                "year": row[4],
+            }
+            for row in rows
+        ]
+    finally:
+        connection.close()
+
+
+def get_deadlines_for_export(user_id, course_ids):
+    _require_user_id(user_id)
     if not course_ids:
         return []
 
     normalized_ids = [int(course_id) for course_id in course_ids]
     placeholders = ", ".join("?" for _ in normalized_ids)
     connection = get_connection()
-    cursor = connection.cursor()
-    cursor.execute(
-        f"""
-        SELECT
-            d.deadline_id,
-            c.course_id,
-            c.course_name,
-            c.course_code,
-            c.semester,
-            c.year,
-            d.item,
-            d.due_date,
-            d.is_completed
-        FROM deadlines AS d
-        JOIN courses AS c ON c.course_id = d.course_id
-        WHERE c.course_id IN ({placeholders}) AND d.is_completed = 0
-        ORDER BY d.due_date, c.course_code, c.course_name, d.item
-        """,
-        normalized_ids,
-    )
-    deadlines = [
-        {
-            "deadline_id": row[0],
-            "course_id": row[1],
-            "course_name": row[2],
-            "course_code": row[3],
-            "semester": row[4],
-            "year": row[5],
-            "item": row[6],
-            "due_date": row[7],
-            "is_completed": bool(row[8]),
-        }
-        for row in cursor.fetchall()
-    ]
-    connection.close()
-    return deadlines
-
-
-def get_deadlines(course_id):
-    connection = get_connection()
-    cursor = connection.cursor()
-    cursor.execute(
-        """
-        SELECT
-            deadline_id,
-            course_id,
-            item,
-            raw_date,
-            due_date,
-            is_completed,
-            created_at,
-            completed_at
-        FROM deadlines
-        WHERE course_id = ?
-        ORDER BY due_date
-        """,
-        (course_id,),
-    )
-    deadlines = cursor.fetchall()
-    connection.close()
-    return deadlines
-
-
-def update_deadline_status(deadline_id, is_completed):
-    connection = get_connection()
-    cursor = connection.cursor()
-    if is_completed:
-        cursor.execute(
-            """
-            UPDATE deadlines
-            SET is_completed = 1, completed_at = CURRENT_TIMESTAMP
-            WHERE deadline_id = ?
+    try:
+        rows = connection.execute(
+            f"""
+            SELECT
+                d.deadline_id,
+                c.course_id,
+                c.course_name,
+                c.course_code,
+                c.semester,
+                c.year,
+                d.item,
+                d.due_date,
+                d.is_completed
+            FROM deadlines AS d
+            JOIN courses AS c
+              ON c.course_id = d.course_id AND c.user_id = d.user_id
+            WHERE c.user_id = ?
+              AND d.user_id = ?
+              AND c.course_id IN ({placeholders})
+              AND d.is_completed = 0
+            ORDER BY d.due_date, c.course_code, c.course_name, d.item
             """,
-            (deadline_id,),
-        )
-    else:
-        cursor.execute(
-            """
-            UPDATE deadlines
-            SET is_completed = 0, completed_at = NULL
-            WHERE deadline_id = ?
-            """,
-            (deadline_id,),
-        )
-    connection.commit()
-    connection.close()
+            [user_id, user_id, *normalized_ids],
+        ).fetchall()
+        return [
+            {
+                "deadline_id": row[0],
+                "course_id": row[1],
+                "course_name": row[2],
+                "course_code": row[3],
+                "semester": row[4],
+                "year": row[5],
+                "item": row[6],
+                "due_date": row[7],
+                "is_completed": bool(row[8]),
+            }
+            for row in rows
+        ]
+    finally:
+        connection.close()
 
 
-def get_dashboard_stats():
-    connection = get_connection()
-    cursor = connection.cursor()
-    cursor.execute("SELECT COUNT(*) FROM courses")
-    total_courses = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM deadlines")
-    total_deadlines = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM deadlines WHERE is_completed = 1")
-    completed = cursor.fetchone()[0]
-    connection.close()
-    return total_courses, total_deadlines, completed
-
-
-def clear_all_data():
-    """Delete all saved data while preserving the database schema."""
+def get_deadlines(user_id, course_id):
+    _require_user_id(user_id)
     connection = get_connection()
     try:
-        cursor = connection.cursor()
-        cursor.execute("DELETE FROM deadlines")
-        cursor.execute("DELETE FROM courses")
+        return connection.execute(
+            """
+            SELECT
+                d.deadline_id,
+                d.course_id,
+                d.item,
+                d.raw_date,
+                d.due_date,
+                d.is_completed,
+                d.created_at,
+                d.completed_at
+            FROM deadlines AS d
+            JOIN courses AS c
+              ON c.course_id = d.course_id AND c.user_id = d.user_id
+            WHERE d.course_id = ? AND d.user_id = ? AND c.user_id = ?
+            ORDER BY d.due_date
+            """,
+            (course_id, user_id, user_id),
+        ).fetchall()
+    finally:
+        connection.close()
+
+
+def update_deadline_status(user_id, deadline_id, is_completed):
+    _require_user_id(user_id)
+    connection = get_connection()
+    try:
+        if is_completed:
+            cursor = connection.execute(
+                """
+                UPDATE deadlines
+                SET is_completed = 1, completed_at = CURRENT_TIMESTAMP
+                WHERE deadline_id = ? AND user_id = ?
+                  AND EXISTS (
+                      SELECT 1 FROM courses
+                      WHERE courses.course_id = deadlines.course_id
+                        AND courses.user_id = ?
+                  )
+                """,
+                (deadline_id, user_id, user_id),
+            )
+        else:
+            cursor = connection.execute(
+                """
+                UPDATE deadlines
+                SET is_completed = 0, completed_at = NULL
+                WHERE deadline_id = ? AND user_id = ?
+                  AND EXISTS (
+                      SELECT 1 FROM courses
+                      WHERE courses.course_id = deadlines.course_id
+                        AND courses.user_id = ?
+                  )
+                """,
+                (deadline_id, user_id, user_id),
+            )
+        connection.commit()
+        return cursor.rowcount == 1
+    finally:
+        connection.close()
+
+
+def get_dashboard_stats(user_id):
+    _require_user_id(user_id)
+    connection = get_connection()
+    try:
+        total_courses = connection.execute(
+            "SELECT COUNT(*) FROM courses WHERE user_id = ?", (user_id,)
+        ).fetchone()[0]
+        total_deadlines, completed = connection.execute(
+            """
+            SELECT COUNT(*), COALESCE(SUM(is_completed), 0)
+            FROM deadlines
+            WHERE user_id = ?
+              AND EXISTS (
+                  SELECT 1 FROM courses
+                  WHERE courses.course_id = deadlines.course_id
+                    AND courses.user_id = ?
+              )
+            """,
+            (user_id, user_id),
+        ).fetchone()
+        return total_courses, total_deadlines, completed
+    finally:
+        connection.close()
+
+
+def clear_user_data(user_id):
+    """Delete only the current user's saved courses and deadlines."""
+    _require_user_id(user_id)
+    connection = get_connection()
+    try:
+        connection.execute("BEGIN")
+        connection.execute("DELETE FROM deadlines WHERE user_id = ?", (user_id,))
+        connection.execute("DELETE FROM courses WHERE user_id = ?", (user_id,))
         connection.commit()
     except Exception:
         connection.rollback()

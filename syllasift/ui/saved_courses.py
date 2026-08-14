@@ -10,9 +10,9 @@ from syllasift.storage.database import (
 )
 
 
-def display_saved_courses() -> None:
+def display_saved_courses(user_id: str) -> None:
     st.subheader("Saved Courses")
-    course_options = get_course_options()
+    course_options = get_course_options(user_id)
     if not course_options:
         st.info("No saved courses yet.")
         return
@@ -25,7 +25,7 @@ def display_saved_courses() -> None:
         labels[f"{course_name}{suffix}"] = course_id
 
     selected_label = st.selectbox("Choose a course", list(labels))
-    deadlines = get_deadlines(labels[selected_label])
+    deadlines = get_deadlines(user_id, labels[selected_label])
     if not deadlines:
         st.info("No deadlines are saved for this course.")
         return
@@ -50,6 +50,6 @@ def display_saved_courses() -> None:
             f"{row['Item']} — {row['Due Date']}", key=widget_key,
         )
         if checked != is_completed:
-            update_deadline_status(deadline_id, checked)
+            update_deadline_status(user_id, deadline_id, checked)
             st.session_state[sync_key] = checked
             st.rerun()

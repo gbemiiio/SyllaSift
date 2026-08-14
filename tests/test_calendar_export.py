@@ -77,3 +77,17 @@ def test_content_lines_are_folded_to_75_utf8_bytes():
 def test_invalid_due_date_is_rejected():
     with pytest.raises(ValueError):
         build_ics_calendar([deadline(due_date="not-a-date")])
+
+
+def test_unsaved_guest_deadline_gets_stable_uid_without_database_ids():
+    guest = deadline()
+    guest.pop("course_id")
+    guest.pop("deadline_id")
+
+    first = build_ics_calendar([guest], datetime(2026, 1, 1))
+    second = build_ics_calendar([guest], datetime(2026, 1, 1))
+
+    first_uid = next(line for line in first.splitlines() if line.startswith("UID:"))
+    second_uid = next(line for line in second.splitlines() if line.startswith("UID:"))
+    assert first_uid == second_uid
+    assert first_uid.startswith("UID:guest-")

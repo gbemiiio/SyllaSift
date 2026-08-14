@@ -1,6 +1,10 @@
+import uuid
+
 import pandas as pd
 import streamlit as st
 
+from syllasift.auth import auth_is_configured
+from syllasift.calendar.ics import build_ics_calendar
 from syllasift.parsing import extract_deadline_candidates, extract_deadlines
 from syllasift.config import (
     NO_DATED_ASSIGNMENTS_MESSAGE,
@@ -186,7 +190,32 @@ def _render_pending_syllabus(syllabus):
         }
 
 
-def _import_entries(entries) -> None:
+def _calendar_deadlines(entries):
+    calendar_rows = []
+    for entry in entries:
+        if (
+            not entry
+            or not entry["include"]
+            or entry["review_errors"]
+            or not entry["course_name"].strip()
+        ):
+            continue
+        for index, deadline in enumerate(entry["deadlines"]):
+            calendar_rows.append({
+                "event_uid": (
+                    f"guest-{entry['upload_id']}-{index}@syllasift.local"
+                ),
+                "course_name": entry["course_name"].strip(),
+                "course_code": entry["course_code"].strip() or None,
+                "semester": entry["semester"],
+                "year": entry["year"],
+                "item": deadline["Item"],
+                "due_date": deadline["Normalized Date"],
+            })
+    return calendar_rows
+
+
+def _import_entries(entries, user_id) -> None:
     imported_ids = []
     imported_courses = 0
     imported_deadlines = 0
@@ -205,13 +234,14 @@ def _import_entries(entries) -> None:
             continue
         try:
             course_id = save_course(
+                user_id,
                 entry["course_name"].strip(),
                 entry["course_code"].strip() or None,
                 entry["semester"],
                 entry["year"],
             )
             if entry["deadlines"]:
-                save_deadlines(course_id, entry["deadlines"])
+                save_deadlines(user_id, course_id, entry["deadlines"])
             imported_ids.append(entry["upload_id"])
             imported_courses += 1
             imported_deadlines += len(entry["deadlines"])
@@ -230,7 +260,7 @@ def _import_entries(entries) -> None:
     st.rerun()
 
 
-def display_pdf_import() -> None:
+def display_pdf_import(user) -> None:
     st.subheader("Import Syllabi")
     st.caption(
         "Upload one or more syllabus PDFs. "
@@ -273,19 +303,66 @@ def display_pdf_import() -> None:
         return
     entries = [_render_pending_syllabus(syllabus) for syllabus in pending]
     selected_count = sum(bool(entry and entry["include"]) for entry in entries)
-    if st.button(
-        f"Import {selected_count} course(s)",
-        disabled=selected_count == 0,
-        type="primary",
-    ):
-        _import_entries(entries)
+    calendar_deadlines = _calendar_deadlines(entries)
+    st.download_button(
+        "Download reviewed deadlines (.ics)",
+        data=build_ics_calendar(calendar_deadlines) if calendar_deadlines else "",
+        file_name="syllasift-reviewed-deadlines.ics",
+        mime="text/calendar; charset=utf-8",
+        disabled=not calendar_deadlines,
+    )
+    if user.is_authenticated:
+        if st.button(
+            f"Import {selected_count} course(s)",
+            disabled=selected_count == 0,
+            type="primary",
+        ):
+            _import_entries(entries, user.user_id)
+    else:
+        st.caption(
+            "Guest work is not saved. Sign in before importing to keep courses "
+            "and track completion; the Google redirect may clear this upload."
+        )
+        if st.button(
+            "Sign in with Google to save",
+            disabled=not auth_is_configured(),
+            key="pdf_guest_sign_in",
+        ):
+            st.login()
 
 
-def display_manual_import() -> None:
+def _manual_calendar_deadlines(draft, deadlines):
+    return [
+        {
+            "event_uid": (
+                f"guest-manual-{draft['draft_id']}-{index}@syllasift.local"
+            ),
+            "course_name": draft["course_name"],
+            "course_code": draft["course_code"],
+            "semester": draft["semester"],
+            "year": draft["year"],
+            "item": deadline["Item"],
+            "due_date": deadline["Normalized Date"],
+        }
+        for index, deadline in enumerate(deadlines)
+    ]
+
+
+def display_manual_import(user) -> None:
+    if st.session_state.pop("clear_manual_form_on_next_run", False):
+        for key in (
+            "manual_course_name",
+            "manual_course_code",
+            "manual_semester",
+            "manual_year",
+            "manual_syllabus_text",
+            "manual_deadline_editor",
+        ):
+            st.session_state.pop(key, None)
     if notice := st.session_state.pop("manual_import_notice", None):
         st.success(notice)
     with st.expander("Paste syllabus text instead"):
-        with st.form("manual_import_form", clear_on_submit=True):
+        with st.form("manual_import_form", clear_on_submit=False):
             course_name = st.text_input("Course name", key="manual_course_name")
             course_code = st.text_input("Course code", key="manual_course_code")
             semester = st.selectbox(
@@ -302,28 +379,110 @@ def display_manual_import() -> None:
             syllabus_text = st.text_area(
                 "Syllabus text", height=220, key="manual_syllabus_text",
             )
-            submitted = st.form_submit_button("Extract and save")
+            submitted = st.form_submit_button("Extract deadlines")
 
-        if not submitted:
-            return
-        if not course_name.strip():
-            st.error("Course name is required.")
-            return
-        if not syllabus_text.strip():
-            st.error("Syllabus text is required.")
+        if submitted:
+            if not course_name.strip():
+                st.error("Course name is required.")
+                return
+            if not syllabus_text.strip():
+                st.error("Syllabus text is required.")
+                return
+            st.session_state["manual_import_draft"] = {
+                "draft_id": str(uuid.uuid4()),
+                "course_name": course_name.strip(),
+                "course_code": course_code.strip() or None,
+                "semester": semester,
+                "year": int(course_year),
+                "deadlines": extract_deadlines(syllabus_text, int(course_year)),
+            }
+            st.session_state.pop("manual_deadline_editor", None)
+
+        draft = st.session_state.get("manual_import_draft")
+        if not draft:
             return
 
-        deadlines = extract_deadlines(syllabus_text, int(course_year))
-        course_id = save_course(
-            course_name.strip(),
-            course_code.strip() or None,
-            semester,
-            int(course_year),
+        st.caption(
+            f"Review {len(draft['deadlines'])} extracted deadline(s) before "
+            "downloading or saving."
         )
-        if deadlines:
-            save_deadlines(course_id, deadlines)
-        reset_deadline_and_export_state(st.session_state)
-        st.session_state["manual_import_notice"] = (
-            f"Saved {len(deadlines)} deadlines."
+        review_frame = pd.DataFrame([
+            {
+                "Item": row["Item"],
+                "Due Date": row["Normalized Date"],
+            }
+            for row in draft["deadlines"]
+        ], columns=["Item", "Due Date"])
+        if not review_frame.empty:
+            review_frame["Due Date"] = pd.to_datetime(
+                review_frame["Due Date"]
+            ).dt.date
+        edited = st.data_editor(
+            review_frame,
+            width="stretch",
+            hide_index=True,
+            num_rows="dynamic",
+            column_config={
+                "Due Date": st.column_config.DateColumn(
+                    "Due Date", format="YYYY-MM-DD",
+                ),
+            },
+            key="manual_deadline_editor",
         )
-        st.rerun()
+        reviewed_deadlines = []
+        invalid_rows = False
+        for _, row in edited.iterrows():
+            item = str(row.get("Item", "")).strip()
+            due_date = row.get("Due Date")
+            if not item or pd.isna(due_date):
+                invalid_rows = True
+                continue
+            normalized = pd.Timestamp(due_date).strftime("%Y-%m-%d")
+            reviewed_deadlines.append({
+                "Item": item,
+                "Date": normalized,
+                "Normalized Date": normalized,
+            })
+        if invalid_rows:
+            st.error("Every reviewed row needs an item and due date.")
+
+        calendar_rows = _manual_calendar_deadlines(draft, reviewed_deadlines)
+        st.download_button(
+            "Download manual deadlines (.ics)",
+            data=build_ics_calendar(calendar_rows) if calendar_rows else "",
+            file_name="syllasift-manual-deadlines.ics",
+            mime="text/calendar; charset=utf-8",
+            disabled=invalid_rows or not calendar_rows,
+        )
+        if user.is_authenticated:
+            if st.button(
+                "Save manual course",
+                disabled=invalid_rows,
+                type="primary",
+            ):
+                course_id = save_course(
+                    user.user_id,
+                    draft["course_name"],
+                    draft["course_code"],
+                    draft["semester"],
+                    draft["year"],
+                )
+                if reviewed_deadlines:
+                    save_deadlines(
+                        user.user_id, course_id, reviewed_deadlines
+                    )
+                reset_deadline_and_export_state(st.session_state)
+                st.session_state.pop("manual_import_draft", None)
+                st.session_state["clear_manual_form_on_next_run"] = True
+                st.session_state["manual_import_notice"] = (
+                    f"Saved {len(reviewed_deadlines)} deadlines."
+                )
+                st.rerun()
+        else:
+            st.caption("Sign in before saving this manual course.")
+            if st.button(
+                "Sign in with Google to save manual course",
+                disabled=not auth_is_configured(),
+                key="manual_guest_sign_in",
+            ):
+                st.login()

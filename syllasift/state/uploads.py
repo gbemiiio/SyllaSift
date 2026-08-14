@@ -121,5 +121,6 @@ def has_unsaved_work(
     return bool(
         has_selected_files
         or state[PENDING_ORDER_KEY]
+        or state.get("manual_import_draft")
         or any(str(value).strip() for value in manual_values)
     )

@@ -18,7 +18,7 @@ def finish_calendar_export(session_state=None) -> None:
     clear_export_selection(state)
 
 
-def display_calendar_export() -> None:
+def display_calendar_export(user_id: str) -> None:
     st.subheader("Export Calendar")
     st.caption(
         "Download incomplete deadlines for Google Calendar, "
@@ -27,7 +27,7 @@ def display_calendar_export() -> None:
     if st.session_state.pop("calendar_export_completed", False):
         st.success("Calendar downloaded. The export selection was cleared.")
 
-    courses = get_courses_for_export()
+    courses = get_courses_for_export(user_id)
     if not courses:
         st.info("Save a course before exporting a calendar.")
         return
@@ -51,7 +51,7 @@ def display_calendar_export() -> None:
     selected_labels = st.multiselect(
         "Choose courses", list(course_labels), key="calendar_export_courses",
     )
-    deadlines = get_deadlines_for_export([
+    deadlines = get_deadlines_for_export(user_id, [
         course_labels[label] for label in selected_labels
     ])
     if selected_labels:

@@ -1,84 +1,188 @@
+import sqlite3
+import uuid
+
+import pytest
+
 import database
 
 
-def test_clear_all_data_removes_deadlines_before_courses(tmp_path, monkeypatch):
-    test_database = tmp_path / "syllasift-test.db"
-    monkeypatch.setattr(database, "DATABASE_NAME", str(test_database))
-
-    database.initialize_database()
-    course_id = database.save_course(
-        "Test Course",
-        "TEST 1000",
-        "Fall",
-        2026,
-    )
-    database.save_deadlines(
-        course_id,
-        [
-            {
-                "Item": "Homework 1",
-                "Date": "September 1",
-                "Normalized Date": "2026-09-01",
-            }
-        ],
-    )
-
-    database.clear_all_data()
-
-    assert database.get_dashboard_stats() == (0, 0, 0)
-    assert database.get_course_options() == []
-
-
-def test_new_deadlines_are_explicitly_saved_incomplete(tmp_path, monkeypatch):
-    test_database = tmp_path / "incomplete-default.db"
+def initialized_database(tmp_path, monkeypatch, name="test.db"):
+    test_database = tmp_path / name
     monkeypatch.setattr(database, "DATABASE_NAME", str(test_database))
     database.initialize_database()
+    first_user = database.get_or_create_user("google-first", "first@example.com")
+    second_user = database.get_or_create_user("google-second", "second@example.com")
+    return test_database, first_user, second_user
 
-    course_id = database.save_course(
-        "Test Course", "TEST 1000", "Fall", 2026,
+
+def deadline(item="Homework 1", due_date="2026-09-01"):
+    return {
+        "Item": item,
+        "Date": due_date,
+        "Normalized Date": due_date,
+    }
+
+
+def test_user_creation_is_idempotent_and_uses_uuid(tmp_path, monkeypatch):
+    _, first_user, _ = initialized_database(tmp_path, monkeypatch)
+
+    repeated = database.get_or_create_user(
+        "google-first", "new-address@example.com"
     )
-    database.save_deadlines(course_id, [
-        {
-            "Item": "Homework 1",
-            "Date": "September 1",
-            "Normalized Date": "2026-09-01",
-        }
-    ])
 
-    saved_deadline = database.get_deadlines(course_id)[0]
-    assert saved_deadline[5] == 0
-    assert saved_deadline[7] is None
-    assert [row["item"] for row in database.get_deadlines_for_export([course_id])] == [
-        "Homework 1"
-    ]
+    assert repeated == first_user
+    assert str(uuid.UUID(first_user)) == first_user
 
 
-def test_calendar_export_queries_exclude_completed_deadlines(tmp_path, monkeypatch):
-    test_database = tmp_path / "calendar-export.db"
-    monkeypatch.setattr(database, "DATABASE_NAME", str(test_database))
-    database.initialize_database()
-
+def test_clear_user_data_preserves_other_users(tmp_path, monkeypatch):
+    _, first_user, second_user = initialized_database(tmp_path, monkeypatch)
     first_course = database.save_course(
-        "Linear Algebra", "MATH 1553", "Spring", 2026,
+        first_user, "First Course", "ONE 1000", "Fall", 2026
     )
     second_course = database.save_course(
-        "Seminar", None, "Fall", 2026,
+        second_user, "Second Course", "TWO 1000", "Fall", 2026
     )
-    database.save_deadlines(first_course, [
-        {"Item": "Exam 1", "Date": "February 5", "Normalized Date": "2026-02-05"},
-        {"Item": "Exam 2", "Date": "March 5", "Normalized Date": "2026-03-05"},
+    database.save_deadlines(first_user, first_course, [deadline()])
+    database.save_deadlines(second_user, second_course, [deadline("Exam")])
+
+    database.clear_user_data(first_user)
+
+    assert database.get_dashboard_stats(first_user) == (0, 0, 0)
+    assert database.get_dashboard_stats(second_user) == (1, 1, 0)
+
+
+def test_new_deadlines_are_incomplete_and_owner_scoped(tmp_path, monkeypatch):
+    _, first_user, second_user = initialized_database(tmp_path, monkeypatch)
+    course_id = database.save_course(
+        first_user, "Test Course", "TEST 1000", "Fall", 2026
+    )
+    database.save_deadlines(first_user, course_id, [deadline()])
+
+    saved_deadline = database.get_deadlines(first_user, course_id)[0]
+
+    assert saved_deadline[5] == 0
+    assert saved_deadline[7] is None
+    assert database.get_deadlines(second_user, course_id) == []
+    assert database.get_deadlines_for_export(second_user, [course_id]) == []
+
+
+def test_cross_user_writes_are_rejected_without_disclosure(tmp_path, monkeypatch):
+    _, first_user, second_user = initialized_database(tmp_path, monkeypatch)
+    course_id = database.save_course(
+        first_user, "Private Course", None, "Fall", 2026
+    )
+    database.save_deadlines(first_user, course_id, [deadline()])
+    deadline_id = database.get_deadlines(first_user, course_id)[0][0]
+
+    with pytest.raises(ValueError, match="Course not found"):
+        database.save_deadlines(second_user, course_id, [deadline("Intrusion")])
+    assert not database.update_deadline_status(second_user, deadline_id, True)
+    assert database.get_deadlines(first_user, course_id)[0][5] == 0
+
+
+def test_new_ownerless_rows_and_owner_changes_are_blocked(tmp_path, monkeypatch):
+    _, first_user, second_user = initialized_database(tmp_path, monkeypatch)
+    course_id = database.save_course(
+        first_user, "Owned Course", None, "Fall", 2026
+    )
+    connection = database.get_connection()
+    try:
+        with pytest.raises(sqlite3.IntegrityError, match="require an owner"):
+            connection.execute(
+                """
+                INSERT INTO courses (course_name, semester, year)
+                VALUES ('Ownerless', 'Fall', 2026)
+                """
+            )
+        connection.rollback()
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            connection.execute(
+                "UPDATE courses SET user_id = ? WHERE course_id = ?",
+                (second_user, course_id),
+            )
+    finally:
+        connection.close()
+
+
+def test_exports_and_dashboard_are_isolated_and_exclude_completed(
+    tmp_path, monkeypatch,
+):
+    _, first_user, second_user = initialized_database(tmp_path, monkeypatch)
+    first_course = database.save_course(
+        first_user, "Linear Algebra", "MATH 1553", "Spring", 2026
+    )
+    second_course = database.save_course(
+        second_user, "Seminar", None, "Fall", 2026
+    )
+    database.save_deadlines(first_user, first_course, [
+        deadline("Exam 1", "2026-02-05"),
+        deadline("Exam 2", "2026-03-05"),
     ])
-    database.save_deadlines(second_course, [
-        {"Item": "Reflection", "Date": "September 1", "Normalized Date": "2026-09-01"},
-    ])
+    database.save_deadlines(
+        second_user, second_course, [deadline("Reflection")]
+    )
+    first_deadline = database.get_deadlines(first_user, first_course)[0][0]
+    assert database.update_deadline_status(first_user, first_deadline, True)
 
-    first_deadline = database.get_deadlines(first_course)[0][0]
-    database.update_deadline_status(first_deadline, True)
+    courses = database.get_courses_for_export(first_user)
+    exported = database.get_deadlines_for_export(
+        first_user, [first_course, second_course]
+    )
 
-    courses = database.get_courses_for_export()
-    exported = database.get_deadlines_for_export([first_course, second_course])
+    assert [course["course_id"] for course in courses] == [first_course]
+    assert [row["item"] for row in exported] == ["Exam 2"]
+    assert database.get_dashboard_stats(first_user) == (1, 2, 1)
+    assert database.get_dashboard_stats(second_user) == (1, 1, 0)
+    assert database.get_deadlines_for_export(first_user, []) == []
 
-    assert {course["course_id"] for course in courses} == {first_course, second_course}
-    assert [row["item"] for row in exported] == ["Exam 2", "Reflection"]
-    assert all(not row["is_completed"] for row in exported)
-    assert database.get_deadlines_for_export([]) == []
+
+def test_legacy_rows_are_preserved_but_hidden_after_migration(
+    tmp_path, monkeypatch,
+):
+    test_database = tmp_path / "legacy.db"
+    connection = sqlite3.connect(str(test_database))
+    connection.executescript(
+        """
+        CREATE TABLE courses (
+            course_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            course_name TEXT NOT NULL,
+            course_code TEXT,
+            semester TEXT NOT NULL,
+            year INTEGER NOT NULL
+        );
+        CREATE TABLE deadlines (
+            deadline_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            course_id INTEGER NOT NULL,
+            item TEXT NOT NULL,
+            raw_date TEXT,
+            due_date TEXT NOT NULL,
+            is_completed INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            completed_at TEXT,
+            FOREIGN KEY (course_id) REFERENCES courses(course_id)
+        );
+        INSERT INTO courses (course_name, semester, year)
+        VALUES ('Legacy Course', 'Fall', 2025);
+        INSERT INTO deadlines (course_id, item, due_date)
+        VALUES (1, 'Legacy Exam', '2025-10-01');
+        """
+    )
+    connection.commit()
+    connection.close()
+    monkeypatch.setattr(database, "DATABASE_NAME", str(test_database))
+
+    database.initialize_database()
+    user_id = database.get_or_create_user("google-new")
+
+    assert database.get_course_options(user_id) == []
+    connection = database.get_connection()
+    try:
+        assert connection.execute(
+            "SELECT course_name, user_id FROM courses"
+        ).fetchall() == [("Legacy Course", None)]
+        assert connection.execute(
+            "SELECT item, user_id FROM deadlines"
+        ).fetchall() == [("Legacy Exam", None)]
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+    finally:
+        connection.close()
