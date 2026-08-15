@@ -413,6 +413,53 @@ def test_confirm_clear_uploads_preserves_saved_database(tmp_path, monkeypatch):
     ]
 
 
+def test_clear_saved_data_resets_confirmation_and_preserves_unsaved_work(
+    tmp_path, monkeypatch,
+):
+    app = app_with_pending(tmp_path, monkeypatch, ["unsaved"], signed_in=True)
+    user = authenticated_user()
+    other_user_id = database.get_or_create_user(
+        "other-streamlit-user", "other@example.com",
+    )
+    user_course_id = database.save_course(
+        user.user_id, "Saved Course", "SAVE 1000", "Fall", 2026,
+    )
+    database.save_deadlines(user.user_id, user_course_id, [{
+        "Item": "Saved Task",
+        "Date": "September 1",
+        "Normalized Date": "2026-09-01",
+    }])
+    other_course_id = database.save_course(
+        other_user_id, "Other Course", "OTHER 1000", "Fall", 2026,
+    )
+    database.save_deadlines(other_user_id, other_course_id, [{
+        "Item": "Other Task",
+        "Date": "September 2",
+        "Normalized Date": "2026-09-02",
+    }])
+    app.run(timeout=30)
+
+    confirmation = app.checkbox(key="clear_saved_confirmation")
+    confirmation.check().run(timeout=30)
+    clear_button = next(
+        button for button in app.button
+        if button.label == "Clear saved data"
+    )
+    assert not clear_button.disabled
+
+    clear_button.click().run(timeout=30)
+
+    assert database.get_dashboard_stats(user.user_id) == (0, 0, 0)
+    assert database.get_dashboard_stats(other_user_id) == (1, 1, 0)
+    assert not app.checkbox(key="clear_saved_confirmation").value
+    assert next(
+        button for button in app.button
+        if button.label == "Clear saved data"
+    ).disabled
+    assert app.session_state["pending_syllabus_order"] == ["unsaved"]
+    assert "unsaved" in app.session_state["pending_syllabi"]
+
+
 def test_subset_import_removes_only_successfully_imported_previews(
     tmp_path, monkeypatch,
 ):
