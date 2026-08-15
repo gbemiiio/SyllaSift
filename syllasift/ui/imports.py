@@ -30,21 +30,9 @@ def clean_uploaded_filename(filename: str) -> str:
     return filename[:first_pdf_end + 4] if first_pdf_end >= 0 else filename
 
 
-@st.dialog("Clear all uploaded syllabi?")
-def confirm_clear_uploaded_syllabi() -> None:
-    st.write(
-        "This discards every unsaved PDF and all edits in their previews. "
-        "Saved courses will not be changed."
-    )
-    keep_column, clear_column = st.columns(2)
-    if keep_column.button("Keep uploads", width="stretch"):
-        st.rerun()
-    if clear_column.button(
-        "Clear uploaded syllabi", type="primary", width="stretch",
-    ):
-        clear_pending_syllabi(st.session_state)
-        st.session_state["upload_notice"] = "All unsaved PDF uploads were cleared."
-        st.rerun()
+def _clear_uploaded_syllabi() -> None:
+    clear_pending_syllabi(st.session_state)
+    st.session_state["upload_notice"] = "All unsaved PDF uploads were cleared."
 
 
 def _display_import_result() -> None:
@@ -331,11 +319,11 @@ def display_pdf_import(user) -> None:
         advance_uploader_generation(st.session_state)
         st.rerun()
 
-    if action_row.button(
+    action_row.button(
         "Clear all uploaded syllabi",
         disabled=not uploaded_files and not pending,
-    ):
-        confirm_clear_uploaded_syllabi()
+        on_click=_clear_uploaded_syllabi,
+    )
 
     pending = get_pending_syllabi(st.session_state)
     if not pending:

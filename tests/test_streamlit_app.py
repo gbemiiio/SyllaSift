@@ -398,16 +398,14 @@ def test_confirm_clear_uploads_preserves_saved_database(tmp_path, monkeypatch):
         button for button in app.button
         if button.label == "Clear all uploaded syllabi"
     ).click().run(timeout=30)
-    assert any(button.label == "Keep uploads" for button in app.button)
-
-    # AppTest currently renders dialog fragments but does not execute their
-    # button callbacks, so exercise the same state action directly.
-    app.session_state["pending_syllabi"] = {}
-    app.session_state["pending_syllabus_order"] = []
-    app.session_state["pdf_uploader_generation"] += 1
-    app.run(timeout=30)
 
     assert app.session_state["pending_syllabus_order"] == []
+    assert app.session_state["pending_syllabi"] == {}
+    assert app.session_state["pdf_uploader_generation"] == 1
+    assert any(
+        success.value == "All unsaved PDF uploads were cleared."
+        for success in app.success
+    )
     assert database.get_course_options(user.user_id) == [
         (saved_course_id, "Saved Course")
     ]
