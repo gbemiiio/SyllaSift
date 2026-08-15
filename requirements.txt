@@ -6,3 +6,4 @@ rapidocr-onnxruntime
 pytest
 streamlit
 Authlib==1.6.5
+httpx==0.28.1
