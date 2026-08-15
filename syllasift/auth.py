@@ -110,9 +110,13 @@ def display_authentication() -> CurrentUser:
         st.session_state[AUTH_CHOICE_RESOLVED_KEY] = True
         st.session_state[AUTH_DIALOG_REQUESTED_KEY] = False
         label = user.name or user.email or "Signed-in user"
-        identity_column, action_column = st.columns([5, 1])
-        identity_column.caption(f"Signed in as {label}")
-        if action_column.button("Sign out"):
+        auth_row = st.container(
+            horizontal=True,
+            horizontal_alignment="distribute",
+            vertical_alignment="center",
+        )
+        auth_row.caption(f"Signed in as {label}")
+        if auth_row.button("Sign out"):
             st.session_state.pop(AUTH_CHOICE_RESOLVED_KEY, None)
             st.session_state.pop(AUTH_DIALOG_REQUESTED_KEY, None)
             st.logout()
@@ -126,9 +130,13 @@ def display_authentication() -> CurrentUser:
         st.session_state[AUTH_DIALOG_REQUESTED_KEY] = False
         display_sign_in_dialog()
 
-    identity_column, action_column = st.columns([5, 1])
-    identity_column.caption("Using SyllaSift as a guest")
-    action_column.button(
+    auth_row = st.container(
+        horizontal=True,
+        horizontal_alignment="distribute",
+        vertical_alignment="center",
+    )
+    auth_row.caption("Using SyllaSift as a guest")
+    auth_row.button(
         "Sign in",
         on_click=request_sign_in_dialog,
         key="guest_header_sign_in",
