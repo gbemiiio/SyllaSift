@@ -76,6 +76,7 @@ def test_import_reset_clears_deadline_and_export_widgets_only():
         "deadline_42": True,
         "deadline_42_saved_value": True,
         "calendar_export_courses": ["MATH 1553"],
+        "calendar_export_course_ids": [42],
         "processed_syllabi": [{"filename": "syllabus.pdf"}],
     }
 
@@ -87,23 +88,30 @@ def test_import_reset_clears_deadline_and_export_widgets_only():
 
 
 def test_calendar_export_selects_all_courses_once_then_preserves_changes():
-    labels = {
-        "CS 3600 — Artificial Intelligence": 1,
-        "MATH 1553 — Linear Algebra": 2,
+    course_ids = [1, 2]
+    state = {}
+
+    initialize_calendar_export_selection(state, course_ids)
+    assert state["calendar_export_course_ids"] == course_ids
+
+    state["calendar_export_course_ids"] = [2]
+    initialize_calendar_export_selection(state, course_ids)
+
+    assert state["calendar_export_course_ids"] == [2]
+
+
+def test_calendar_export_reconciles_removed_courses_and_legacy_state():
+    state = {
+        "calendar_export_course_ids": [2, 99],
+        "calendar_export_courses": ["Old label"],
+        "calendar_export_selection_initialized": True,
     }
-    state = {"calendar_export_courses": []}
 
-    initialize_calendar_export_selection(state, labels)
-    assert state["calendar_export_courses"] == list(labels)
+    initialize_calendar_export_selection(state, [1, 2])
 
-    state["calendar_export_courses"] = [
-        "MATH 1553 — Linear Algebra"
-    ]
-    initialize_calendar_export_selection(state, labels)
-
-    assert state["calendar_export_courses"] == [
-        "MATH 1553 — Linear Algebra"
-    ]
+    assert state["calendar_export_course_ids"] == [2]
+    assert "calendar_export_courses" not in state
+    assert "calendar_export_selection_initialized" not in state
 
 
 def test_accidentally_concatenated_pdf_name_is_readable():
@@ -113,16 +121,13 @@ def test_accidentally_concatenated_pdf_name_is_readable():
     assert clean_uploaded_filename("normal-syllabus.pdf") == "normal-syllabus.pdf"
 
 
-def test_finished_calendar_export_clears_only_temporary_selection():
+def test_finished_calendar_export_preserves_course_selection():
     state = {
-        "calendar_export_courses": ["MATH 1553 — Linear Algebra"],
-        "calendar_export_selection_initialized": True,
+        "calendar_export_course_ids": [1, 2],
         "processed_syllabi": [{"filename": "syllabus.pdf"}],
     }
 
     finish_calendar_export(state)
 
-    assert state["calendar_export_courses"] == []
-    assert state["calendar_export_selection_initialized"] is True
-    assert state["calendar_export_completed"] is True
+    assert state["calendar_export_course_ids"] == [1, 2]
     assert state["processed_syllabi"] == [{"filename": "syllabus.pdf"}]

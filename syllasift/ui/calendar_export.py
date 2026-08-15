@@ -4,7 +4,8 @@ import streamlit as st
 
 from syllasift.calendar.ics import build_ics_calendar
 from syllasift.state.widgets import (
-    finish_calendar_export as clear_export_selection,
+    CALENDAR_EXPORT_SELECTION_KEY,
+    finish_calendar_export as preserve_export_selection,
     initialize_calendar_export_selection,
 )
 from syllasift.storage.database import (
@@ -15,7 +16,7 @@ from syllasift.storage.database import (
 
 def finish_calendar_export(session_state=None) -> None:
     state = st.session_state if session_state is None else session_state
-    clear_export_selection(state)
+    preserve_export_selection(state)
 
 
 def display_calendar_export(user_id: str) -> None:
@@ -24,15 +25,13 @@ def display_calendar_export(user_id: str) -> None:
         "Download incomplete deadlines for Google Calendar, "
         "Apple Calendar, or Outlook."
     )
-    if st.session_state.pop("calendar_export_completed", False):
-        st.success("Calendar downloaded. The export selection was cleared.")
-
     courses = get_courses_for_export(user_id)
     if not courses:
         st.info("Save a course before exporting a calendar.")
         return
 
-    course_labels = {}
+    labels_by_id = {}
+    used_labels = set()
     for course in courses:
         identity = course["course_code"] or course["course_name"]
         if identity == course["course_name"]:
@@ -42,19 +41,21 @@ def display_calendar_export(user_id: str) -> None:
                 f"{identity} — {course['course_name']} "
                 f"({course['semester']} {course['year']})"
             )
-        label = base if base not in course_labels else (
+        label = base if base not in used_labels else (
             f"{base} — Course {course['course_id']}"
         )
-        course_labels[label] = course["course_id"]
+        used_labels.add(label)
+        labels_by_id[course["course_id"]] = label
 
-    initialize_calendar_export_selection(st.session_state, course_labels)
-    selected_labels = st.multiselect(
-        "Choose courses", list(course_labels), key="calendar_export_courses",
+    initialize_calendar_export_selection(st.session_state, labels_by_id)
+    selected_course_ids = st.multiselect(
+        "Choose courses",
+        list(labels_by_id),
+        format_func=labels_by_id.__getitem__,
+        key=CALENDAR_EXPORT_SELECTION_KEY,
     )
-    deadlines = get_deadlines_for_export(user_id, [
-        course_labels[label] for label in selected_labels
-    ])
-    if selected_labels:
+    deadlines = get_deadlines_for_export(user_id, selected_course_ids)
+    if selected_course_ids:
         if deadlines:
             st.caption(f"{len(deadlines)} incomplete deadlines ready to export.")
         else:
@@ -65,6 +66,6 @@ def display_calendar_export(user_id: str) -> None:
         data=build_ics_calendar(deadlines) if deadlines else "",
         file_name=f"syllasift-deadlines-{date.today().isoformat()}.ics",
         mime="text/calendar; charset=utf-8",
-        on_click=finish_calendar_export,
-        disabled=not selected_labels or not deadlines,
+        on_click="ignore",
+        disabled=not selected_course_ids or not deadlines,
     )

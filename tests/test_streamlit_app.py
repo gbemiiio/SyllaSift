@@ -127,6 +127,93 @@ def test_authenticated_user_bypasses_welcome_dialog(tmp_path, monkeypatch):
     assert any(button.label == "Sign out" for button in app.button)
 
 
+def test_saved_calendar_export_is_ready_on_first_render_and_survives_reruns(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(database, "DATABASE_NAME", str(tmp_path / "app.db"))
+    database.initialize_database()
+    user = authenticated_user()
+    monkeypatch.setattr(
+        "syllasift.ui.app.display_authentication", lambda: user
+    )
+    course_id = database.save_course(
+        user.user_id, "Physical Activity", "APPH 1050", "Fall", 2026,
+    )
+    database.save_deadlines(user.user_id, course_id, [{
+        "Item": "Extra Credit",
+        "Date": "December 2",
+        "Normalized Date": "2026-12-02",
+    }])
+    captured_exports = []
+
+    def capture_calendar(deadlines):
+        captured_exports.append(list(deadlines))
+        return "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n"
+
+    monkeypatch.setattr(
+        "syllasift.ui.calendar_export.build_ics_calendar", capture_calendar,
+    )
+    app = AppTest.from_file("app.py").run(timeout=30)
+
+    download = next(
+        item for item in app.get("download_button")
+        if item.label == "Download calendar (.ics)"
+    )
+    assert not download.disabled
+    assert app.multiselect[0].value == [course_id]
+    assert captured_exports[-1][0]["item"] == "Extra Credit"
+
+    app.run(timeout=30)
+    assert app.multiselect[0].value == [course_id]
+    assert not next(
+        item for item in app.get("download_button")
+        if item.label == "Download calendar (.ics)"
+    ).disabled
+
+    connection = database.get_connection()
+    try:
+        connection.execute(
+            "UPDATE courses SET course_name = ? WHERE course_id = ?",
+            ("Science of Physical Activity and Health", course_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    app.run(timeout=30)
+    assert app.multiselect[0].value == [course_id]
+    assert not next(
+        item for item in app.get("download_button")
+        if item.label == "Download calendar (.ics)"
+    ).disabled
+
+
+def test_saved_calendar_export_explains_when_no_deadlines_are_available(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(database, "DATABASE_NAME", str(tmp_path / "app.db"))
+    database.initialize_database()
+    user = authenticated_user()
+    monkeypatch.setattr(
+        "syllasift.ui.app.display_authentication", lambda: user
+    )
+    database.save_course(
+        user.user_id, "Course Without Deadlines", "NONE 1000", "Fall", 2026,
+    )
+
+    app = AppTest.from_file("app.py").run(timeout=30)
+
+    download = next(
+        item for item in app.get("download_button")
+        if item.label == "Download calendar (.ics)"
+    )
+    assert download.disabled
+    assert any(
+        info.value == "The selected courses have no incomplete deadlines to export."
+        for info in app.info
+    )
+
+
 def test_remove_one_preview_leaves_other_temporary_courses(tmp_path, monkeypatch):
     app = app_with_pending(tmp_path, monkeypatch, ["one", "two", "three"])
 
