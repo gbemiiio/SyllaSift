@@ -12,6 +12,72 @@ from ..common import append_deadline, get_lines
 from ..patterns import DATE_PATTERN, DAY_FIRST_DATE_PATTERN
 
 
+def extract_course_calendar_deadlines(tables, course_year):
+    """Read authoritative Date / Topic / Assignment course calendars."""
+    deadlines = []
+    seen = set()
+
+    for table in tables:
+        if not table or not table[0]:
+            continue
+
+        headers = [str(cell or "").strip().lower() for cell in table[0]]
+        date_indexes = [
+            index for index, header in enumerate(headers)
+            if header in {"date", "dates"}
+        ]
+        topic_indexes = [
+            index for index, header in enumerate(headers)
+            if header in {"topic", "topics"}
+        ]
+        assignment_indexes = [
+            index for index, header in enumerate(headers)
+            if header in {"assignment", "assignments"}
+        ]
+        if not date_indexes or not topic_indexes or not assignment_indexes:
+            continue
+
+        date_index = date_indexes[0]
+        topic_index = topic_indexes[0]
+        assignment_index = assignment_indexes[0]
+        topic_start = (date_index + topic_index) // 2 + 1
+        assignment_start = (topic_index + assignment_index) // 2 + 1
+
+        for row in table[1:]:
+            cells = [str(cell or "").strip() for cell in (row or [])]
+            raw_date = next(
+                (
+                    cell for cell in cells
+                    if re.fullmatch(DATE_PATTERN, cell, re.IGNORECASE)
+                ),
+                "",
+            )
+            if not raw_date:
+                continue
+
+            assignment_text = "\n".join(
+                cell for cell in cells[assignment_start:] if cell
+            )
+            for assignment in get_lines(assignment_text):
+                item = clean_explicit_item(assignment)
+                if item and not line_is_excluded(item):
+                    append_deadline(
+                        deadlines, seen, item, raw_date, course_year,
+                    )
+
+            topic_text = " ".join(
+                cell for cell in cells[topic_start:assignment_start] if cell
+            )
+            item = clean_explicit_item(topic_text)
+            if scheduled_event_kind(item) == "exam":
+                item = re.sub(r"\s*[–—]\s*", " - ", item)
+                append_deadline(
+                    deadlines, seen, item, raw_date, course_year,
+                )
+
+    return deadlines
+
+
 def extract_assignment_due_table_deadlines(tables, course_year):
     """Split each deliverable in an Assignments Due table into its own row."""
     deadlines = []

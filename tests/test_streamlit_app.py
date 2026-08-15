@@ -1,6 +1,6 @@
 from streamlit.testing.v1 import AppTest
 
-from syllasift.auth import CurrentUser
+from syllasift.auth import AUTH_CHOICE_RESOLVED_KEY, CurrentUser
 from syllasift.storage import database
 
 
@@ -43,6 +43,7 @@ def app_with_pending(tmp_path, monkeypatch, upload_ids, signed_in=False):
             "syllasift.ui.app.display_authentication", lambda: user
         )
     app = AppTest.from_file("app.py")
+    app.session_state[AUTH_CHOICE_RESOLVED_KEY] = True
     app.session_state["pending_syllabi"] = {
         upload_id: pending(upload_id) for upload_id in upload_ids
     }
@@ -55,6 +56,7 @@ def test_guest_app_hides_saved_data_controls(
     tmp_path, monkeypatch,
 ):
     monkeypatch.setattr(database, "DATABASE_NAME", str(tmp_path / "app.db"))
+    monkeypatch.setattr("syllasift.auth.auth_is_configured", lambda: False)
 
     app = AppTest.from_file("app.py").run(timeout=30)
 
@@ -65,6 +67,64 @@ def test_guest_app_hides_saved_data_controls(
     assert "Clear saved data" not in buttons
     assert "Dashboard" not in [heading.value for heading in app.subheader]
     assert any("extract and export" in info.value for info in app.info)
+    assert app.get("dialog")[0].type == "dialog"
+    assert app.button(key="auth_dialog_google_sign_in").disabled
+    assert any(
+        "isn't set up on this installation" in info.value
+        for info in app.info
+    )
+
+
+def test_guest_can_close_welcome_and_reopen_it_from_header(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(database, "DATABASE_NAME", str(tmp_path / "app.db"))
+    app = AppTest.from_file("app.py").run(timeout=30)
+
+    app.button(key="auth_dialog_continue_as_guest").click().run(timeout=30)
+
+    assert app.session_state[AUTH_CHOICE_RESOLVED_KEY]
+    assert app.button(key="guest_header_sign_in").label == "Sign in"
+
+    app.button(key="guest_header_sign_in").click().run(timeout=30)
+
+    assert app.button(key="auth_dialog_google_sign_in").label == (
+        "Sign in with Google"
+    )
+
+
+def test_configured_google_action_is_enabled_and_starts_login(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(database, "DATABASE_NAME", str(tmp_path / "app.db"))
+    login_calls = []
+    monkeypatch.setattr("syllasift.auth.auth_is_configured", lambda: True)
+    monkeypatch.setattr(
+        "syllasift.auth.st.login", lambda: login_calls.append(True)
+    )
+    app = AppTest.from_file("app.py").run(timeout=30)
+
+    google_button = app.button(key="auth_dialog_google_sign_in")
+    assert not google_button.disabled
+
+    google_button.click().run(timeout=30)
+
+    assert login_calls == [True]
+
+
+def test_authenticated_user_bypasses_welcome_dialog(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DATABASE_NAME", str(tmp_path / "app.db"))
+    database.initialize_database()
+    user = authenticated_user()
+    monkeypatch.setattr("syllasift.auth.resolve_current_user", lambda: user)
+
+    app = AppTest.from_file("app.py").run(timeout=30)
+
+    assert not app.exception
+    assert not any(
+        button.key == "auth_dialog_google_sign_in" for button in app.button
+    )
+    assert any(button.label == "Sign out" for button in app.button)
 
 
 def test_remove_one_preview_leaves_other_temporary_courses(tmp_path, monkeypatch):
@@ -78,9 +138,136 @@ def test_remove_one_preview_leaves_other_temporary_courses(tmp_path, monkeypatch
     ]
 
 
+def test_pdf_save_prompt_opens_shared_sign_in_dialog(tmp_path, monkeypatch):
+    app = app_with_pending(tmp_path, monkeypatch, ["one"])
+
+    app.button(key="pdf_guest_sign_in").click().run(timeout=30)
+
+    assert app.get("dialog")[0].type == "dialog"
+    assert app.button(key="auth_dialog_google_sign_in").label == (
+        "Sign in with Google"
+    )
+
+
+def test_pdf_review_requires_one_date_choice_and_warns_for_ranges(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(
+        "syllasift.ui.imports.extract_deadline_review",
+        lambda document, year: {
+            "candidates": [],
+            "multiple_date_assessments": [{
+                "item": "Midterm",
+                "choices": [
+                    {"label": "June 30", "normalized_date": "2026-06-30"},
+                    {"label": "July 2", "normalized_date": "2026-07-02"},
+                ],
+                "page": 4,
+                "source": "TEXT",
+            }],
+            "unresolved_assessments": [{
+                "item": "Final Exam",
+                "date_range": "Aug 3 – Aug 6",
+                "page": 4,
+                "source": "TEXT",
+                "message": (
+                    "An exact deadline is not provided for this assessment. "
+                    "Check Canvas."
+                ),
+            }, {
+                "item": "Project 1",
+                "date_range": "Aug 3 – Aug 6",
+                "page": 4,
+                "source": "TEXT",
+                "message": (
+                    "An exact deadline is not provided for this assessment. "
+                    "Check Canvas."
+                ),
+            }],
+        },
+    )
+    app = app_with_pending(tmp_path, monkeypatch, ["urban"])
+
+    assert [warning.value for warning in app.warning] == [
+        "Some assignments do not have specific dates in this syllabus. "
+        "Check Canvas for the specific due dates."
+    ]
+    assert "Final Exam" not in app.warning[0].value
+    choice = app.selectbox(key="deadline_choice_0_urban")
+    assert choice.value is None
+    reviewed_download = next(
+        item for item in app.get("download_button")
+        if item.label == "Download reviewed deadlines (.ics)"
+    )
+    assert reviewed_download.disabled
+
+    choice.select("June 30 (2026-06-30)").run(timeout=30)
+
+    assert app.selectbox(key="deadline_choice_0_urban").value == (
+        "June 30 (2026-06-30)"
+    )
+    reviewed_download = next(
+        item for item in app.get("download_button")
+        if item.label == "Download reviewed deadlines (.ics)"
+    )
+    assert not reviewed_download.disabled
+
+
+def test_structured_calendar_assignments_reach_export_and_saved_course(
+    tmp_path, monkeypatch,
+):
+    assignment_dates = [
+        ("Article Review 1", "2026-02-03"),
+        ("Portfolio 1", "2026-02-05"),
+        ("Article Review 2", "2026-02-26"),
+        ("Portfolio 2", "2026-03-03"),
+        ("Article Review 3", "2026-03-19"),
+        ("Portfolio 3", "2026-04-02"),
+        ("Article Review 4", "2026-04-21"),
+        ("Portfolio 4", "2026-04-23"),
+    ]
+    monkeypatch.setattr(
+        "syllasift.ui.imports.extract_deadline_review",
+        lambda document, year: {
+            "candidates": [
+                {
+                    "Item": item,
+                    "Normalized Date": due_date,
+                    "Include": True,
+                    "Page": 5,
+                }
+                for item, due_date in assignment_dates
+            ],
+            "multiple_date_assessments": [],
+            "unresolved_assessments": [],
+        },
+    )
+    app = app_with_pending(
+        tmp_path, monkeypatch, ["social"], signed_in=True,
+    )
+
+    reviewed_download = next(
+        item for item in app.get("download_button")
+        if item.label == "Download reviewed deadlines (.ics)"
+    )
+    assert not reviewed_download.disabled
+
+    next(
+        button for button in app.button
+        if button.label == "Import 1 course(s)"
+    ).click().run(timeout=30)
+
+    user = authenticated_user()
+    course_id = database.get_course_options(user.user_id)[0][0]
+    saved = database.get_deadlines(user.user_id, course_id)
+    assert [(row[2], row[4]) for row in saved] == assignment_dates
+
+
 def test_guest_manual_extract_enables_ics_without_saving(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "DATABASE_NAME", str(tmp_path / "guest.db"))
-    app = AppTest.from_file("app.py").run(timeout=30)
+    app = AppTest.from_file("app.py")
+    app.session_state[AUTH_CHOICE_RESOLVED_KEY] = True
+    app = app.run(timeout=30)
     app.text_input(key="manual_course_name").input("Biology")
     app.text_input(key="manual_course_code").input("BIO 101")
     app.text_area(key="manual_syllabus_text").input(
@@ -104,6 +291,12 @@ def test_guest_manual_extract_enables_ics_without_saving(tmp_path, monkeypatch):
         assert connection.execute("SELECT COUNT(*) FROM deadlines").fetchone()[0] == 0
     finally:
         connection.close()
+
+    app.button(key="manual_guest_sign_in").click().run(timeout=30)
+    assert app.get("dialog")[0].type == "dialog"
+    assert app.button(key="auth_dialog_google_sign_in").label == (
+        "Sign in with Google"
+    )
 
 
 def test_confirm_clear_uploads_preserves_saved_database(tmp_path, monkeypatch):

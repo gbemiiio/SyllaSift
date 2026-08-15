@@ -16,6 +16,8 @@ class CurrentUser:
 
 
 GUEST_USER = CurrentUser(is_authenticated=False)
+AUTH_CHOICE_RESOLVED_KEY = "auth_choice_resolved"
+AUTH_DIALOG_REQUESTED_KEY = "auth_dialog_requested"
 
 
 def auth_is_configured() -> bool:
@@ -60,22 +62,75 @@ def resolve_current_user(identity=None) -> CurrentUser:
     )
 
 
+def continue_as_guest() -> None:
+    st.session_state[AUTH_CHOICE_RESOLVED_KEY] = True
+    st.session_state[AUTH_DIALOG_REQUESTED_KEY] = False
+
+
+def request_sign_in_dialog() -> None:
+    st.session_state[AUTH_DIALOG_REQUESTED_KEY] = True
+
+
+@st.dialog(
+    "Welcome to SyllaSift",
+    dismissible=True,
+    on_dismiss=continue_as_guest,
+)
+def display_sign_in_dialog() -> None:
+    st.write(
+        "Sign in to save courses and track progress across visits, "
+        "or continue without an account."
+    )
+    configured = auth_is_configured()
+    if not configured:
+        st.info(
+            "Google sign-in isn't set up on this installation. "
+            "You can continue as a guest."
+        )
+    if st.button(
+        "Sign in with Google",
+        disabled=not configured,
+        type="primary",
+        key="auth_dialog_google_sign_in",
+        width="stretch",
+    ):
+        st.login()
+    if st.button(
+        "Continue as guest",
+        key="auth_dialog_continue_as_guest",
+        width="stretch",
+    ):
+        continue_as_guest()
+        st.rerun()
+
+
 def display_authentication() -> CurrentUser:
     user = resolve_current_user()
     if user.is_authenticated:
+        st.session_state[AUTH_CHOICE_RESOLVED_KEY] = True
+        st.session_state[AUTH_DIALOG_REQUESTED_KEY] = False
         label = user.name or user.email or "Signed-in user"
         identity_column, action_column = st.columns([5, 1])
         identity_column.caption(f"Signed in as {label}")
         if action_column.button("Sign out"):
+            st.session_state.pop(AUTH_CHOICE_RESOLVED_KEY, None)
+            st.session_state.pop(AUTH_DIALOG_REQUESTED_KEY, None)
             st.logout()
         return user
 
-    if auth_is_configured():
-        if st.button("Sign in with Google"):
-            st.login()
-    else:
-        st.caption(
-            "Guest mode · Google sign-in is unavailable until OIDC secrets "
-            "are configured."
-        )
+    should_show_dialog = (
+        not st.session_state.get(AUTH_CHOICE_RESOLVED_KEY, False)
+        or st.session_state.get(AUTH_DIALOG_REQUESTED_KEY, False)
+    )
+    if should_show_dialog:
+        st.session_state[AUTH_DIALOG_REQUESTED_KEY] = False
+        display_sign_in_dialog()
+
+    identity_column, action_column = st.columns([5, 1])
+    identity_column.caption("Using SyllaSift as a guest")
+    action_column.button(
+        "Sign in",
+        on_click=request_sign_in_dialog,
+        key="guest_header_sign_in",
+    )
     return user

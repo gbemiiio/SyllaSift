@@ -3,9 +3,9 @@ import uuid
 import pandas as pd
 import streamlit as st
 
-from syllasift.auth import auth_is_configured
+from syllasift.auth import request_sign_in_dialog
 from syllasift.calendar.ics import build_ics_calendar
-from syllasift.parsing import extract_deadline_candidates, extract_deadlines
+from syllasift.parsing import extract_deadline_review, extract_deadlines
 from syllasift.config import (
     NO_DATED_ASSIGNMENTS_MESSAGE,
     PREVIEW_COLUMNS,
@@ -121,17 +121,27 @@ def _render_pending_syllabus(syllabus):
                 key=f"year_{upload_id}",
             )
 
-        candidates = extract_deadline_candidates(syllabus["document"], int(year))
+        review = extract_deadline_review(syllabus["document"], int(year))
+        candidates = review["candidates"]
+        multiple_date_assessments = review["multiple_date_assessments"]
+        unresolved_assessments = review["unresolved_assessments"]
         for notice in syllabus["document"].get("notices", []):
             st.info(notice)
 
-        if candidates:
+        if candidates or multiple_date_assessments:
+            reviewable_count = len(candidates) + len(multiple_date_assessments)
             st.caption(
-                f"{len(candidates)} deadlines found. "
+                f"{reviewable_count} deadline(s) found. "
                 "Review or edit them before importing."
             )
-        else:
+        elif not unresolved_assessments:
             st.info(NO_DATED_ASSIGNMENTS_MESSAGE)
+
+        if unresolved_assessments:
+            st.warning(
+                "Some assignments do not have specific dates in this syllabus. "
+                "Check Canvas for the specific due dates."
+            )
 
         edited = st.data_editor(
             _preview_frame(candidates),
@@ -170,6 +180,35 @@ def _render_pending_syllabus(syllabus):
                 "Item": item,
                 "Date": normalized_date,
                 "Normalized Date": normalized_date,
+            })
+
+        for choice_index, assessment in enumerate(multiple_date_assessments):
+            option_labels = [
+                f"{choice['label']} ({choice['normalized_date']})"
+                for choice in assessment["choices"]
+            ]
+            selected_label = st.selectbox(
+                f"Choose one date for {assessment['item']}",
+                options=option_labels,
+                index=None,
+                placeholder="Select the date to keep",
+                key=f"deadline_choice_{choice_index}_{upload_id}",
+            )
+            st.caption(
+                "The syllabus lists multiple possible dates. "
+                "Only the date you choose will be saved or exported."
+            )
+            if selected_label is None:
+                review_errors.append(
+                    f"choose one date for {assessment['item']}"
+                )
+                continue
+            selected_index = option_labels.index(selected_label)
+            selected = assessment["choices"][selected_index]
+            deadlines.append({
+                "Item": assessment["item"],
+                "Date": selected["label"],
+                "Normalized Date": selected["normalized_date"],
             })
 
         include_course = st.checkbox(
@@ -323,12 +362,11 @@ def display_pdf_import(user) -> None:
             "Guest work is not saved. Sign in before importing to keep courses "
             "and track completion; the Google redirect may clear this upload."
         )
-        if st.button(
+        st.button(
             "Sign in with Google to save",
-            disabled=not auth_is_configured(),
             key="pdf_guest_sign_in",
-        ):
-            st.login()
+            on_click=request_sign_in_dialog,
+        )
 
 
 def _manual_calendar_deadlines(draft, deadlines):
@@ -480,9 +518,8 @@ def display_manual_import(user) -> None:
                 st.rerun()
         else:
             st.caption("Sign in before saving this manual course.")
-            if st.button(
+            st.button(
                 "Sign in with Google to save manual course",
-                disabled=not auth_is_configured(),
                 key="manual_guest_sign_in",
-            ):
-                st.login()
+                on_click=request_sign_in_dialog,
+            )

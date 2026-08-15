@@ -13,6 +13,7 @@ from .strategies.exams import (
 from .strategies.ocr import extract_ocr_column_deadlines
 from .strategies.relative import extract_relative_deadlines
 from .strategies.schedules import (
+    extract_assessment_date_review,
     extract_day_first_schedule_deadlines,
     extract_scheduled_events,
     extract_whitespace_schedule_candidates,
@@ -21,6 +22,7 @@ from .strategies.tables import (
     enrich_calendar_tables,
     extract_assignment_due_table_deadlines,
     extract_calendar_table_deadlines,
+    extract_course_calendar_deadlines,
     extract_date_topic_table_events,
     extract_table_deadlines,
 )
@@ -31,6 +33,32 @@ from .strategies.text import (
     extract_explicit_due_lines,
     extract_release_due_deadlines,
 )
+
+
+def extract_deadline_review(document, course_year):
+    """Return exact candidates plus choices and unresolved date warnings."""
+    candidates = extract_deadline_candidates(document, course_year)
+    if isinstance(document, str):
+        pages = [{
+            "page": None,
+            "text": document,
+            "tables": [],
+            "source": "text",
+        }]
+        document_text = document
+    else:
+        pages = document.get("pages", [])
+        document_text = document.get("text", "") or "\n".join(
+            page.get("text", "") for page in pages
+        )
+    multiple, unresolved = extract_assessment_date_review(
+        pages, document_text, course_year,
+    )
+    return {
+        "candidates": candidates,
+        "multiple_date_assessments": multiple,
+        "unresolved_assessments": unresolved,
+    }
 
 
 def extract_deadline_candidates(document, course_year):
@@ -59,6 +87,10 @@ def extract_deadline_candidates(document, course_year):
             table_deadlines = []
         calendar_deadlines = extract_calendar_table_deadlines(
             calendar_tables_by_page.get(page_position, tables),
+            course_year,
+        )
+        course_calendar_deadlines = extract_course_calendar_deadlines(
+            tables,
             course_year,
         )
         event_table_deadlines = extract_date_topic_table_events(
@@ -92,7 +124,10 @@ def extract_deadline_candidates(document, course_year):
             page.get("text", ""), course_year,
         )
 
-        if assignment_due_deadlines:
+        if course_calendar_deadlines:
+            due_deadlines = []
+            ordinary_deadlines = []
+        elif assignment_due_deadlines:
             due_deadlines = []
             ordinary_deadlines = []
         elif calendar_deadlines or ocr_deadlines:
@@ -120,6 +155,7 @@ def extract_deadline_candidates(document, course_year):
 
         strong_deadlines = (
             event_table_deadlines
+            + course_calendar_deadlines
             + calendar_deadlines
             + ocr_deadlines
             + release_due_deadlines

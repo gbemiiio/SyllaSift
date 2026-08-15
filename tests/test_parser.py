@@ -5,6 +5,7 @@ from parser import (
     detect_course_metadata,
     detect_platform_notices,
     extract_deadline_candidates,
+    extract_deadline_review,
     extract_deadlines,
     extract_ocr_column_deadlines,
     normalize_date,
@@ -374,9 +375,155 @@ def test_whitespace_schedule_relative_and_range_defaults():
     assert [(row["Item"], row["Normalized Date"], row["Include"]) for row in candidates] == [
         ("Self-grade of Notebooks", "2026-01-27", True),
         ("Peer Evaluation", "2026-02-20", True),
-        ("Final Presentations", "2026-04-28", False),
-        ("Final Documentation", "2026-04-28", False),
     ]
+
+
+def test_assessment_with_two_discrete_dates_requires_user_choice():
+    document = {
+        "text": "Semester Schedule\nJune 30 / July 2 MIDTERMS DUE",
+        "pages": [{
+            "page": 4,
+            "source": "text",
+            "text": "June 30 / July 2 MIDTERMS DUE",
+            "tables": [[
+                ["Week", None, "Uploaded to Canvas", None, "Topic"],
+                ["1", None, "May 19 / May 21", None, "Overview"],
+                ["7", None, "June 30 / July 2", None, "MIDTERMS DUE"],
+            ]],
+        }],
+    }
+
+    review = extract_deadline_review(document, 2026)
+
+    assert review["candidates"] == []
+    assert review["multiple_date_assessments"] == [{
+        "item": "Midterm",
+        "choices": [
+            {"label": "June 30", "normalized_date": "2026-06-30"},
+            {"label": "July 2", "normalized_date": "2026-07-02"},
+        ],
+        "page": 4,
+        "source": "TEXT",
+    }]
+    assert review["unresolved_assessments"] == []
+
+
+def test_assessment_range_warns_without_fabricating_deadline():
+    document = {
+        "text": "Semester Schedule\nAug 3 – Aug 6 FINALS",
+        "pages": [{
+            "page": 4,
+            "source": "text",
+            "text": "Aug 3 – Aug 6 FINALS",
+            "tables": [[
+                ["Week", "Uploaded to Canvas", "Topic"],
+                ["12", "Aug 3 – Aug 6", "FINALS"],
+            ]],
+        }],
+    }
+
+    review = extract_deadline_review(document, 2026)
+
+    assert review["candidates"] == []
+    assert review["multiple_date_assessments"] == []
+    assert review["unresolved_assessments"] == [{
+        "item": "Final Exam",
+        "date_range": "Aug 3 – Aug 6",
+        "page": 4,
+        "source": "TEXT",
+        "message": (
+            "An exact deadline is not provided for this assessment. "
+            "Check Canvas."
+        ),
+    }]
+
+
+def test_module_ranges_warn_for_assessments_but_not_lessons():
+    document = {"text": """\
+Modules 1–3 (August 18 – September 7, 2025)
+Module 1: The Basics of Sound
+Lesson 1: How to Approach Exams
+Quiz 1
+Project 1: Sound Collage
+Modules 4–5 (September 8 – 21, 2025)
+Quiz 2
+""", "pages": []}
+
+    review = extract_deadline_review(document, 2025)
+
+    assert [row["item"] for row in review["unresolved_assessments"]] == [
+        "Quiz 1", "Project 1: Sound Collage", "Quiz 2",
+    ]
+    assert review["candidates"] == []
+
+
+def test_non_assessment_slash_dates_do_not_create_choices():
+    document = {"text": "", "pages": [{
+        "page": 4,
+        "text": "",
+        "tables": [[
+            ["Week", "Uploaded to Canvas", "Topic"],
+            ["1", "May 19 / May 21", "Overview and history"],
+        ]],
+    }]}
+
+    assert extract_deadline_review(document, 2026) == {
+        "candidates": [],
+        "multiple_date_assessments": [],
+        "unresolved_assessments": [],
+    }
+
+
+def test_three_column_course_calendar_extracts_assignments_and_exams():
+    calendar = [[
+        ["", "Dates", "", "", "Topics", "", "", "Assignments", ""],
+        ["1/13", None, None, "Syllabus and Introduction", None, None, "", None, None],
+        ["2/3", None, None, "The Social Self", None, None, "Article Review 1", None, None],
+        ["2/5", None, None, "Review", None, None, "Portfolio 1", None, None],
+        ["", "2/10", "", "", "Exam 1 – 35 MC", None, None, None, ""],
+        ["2/26", None, None, "Group Influence", None, None, "Article Review 2", None, None],
+        ["3/3", None, None, "Review", None, None, "Portfolio 2", None, None],
+        ["", "3/5", "", "", "Exam 2 - 50 MC", None, None, None, ""],
+        ["3/19", None, None, "Aggression", None, None, "Article Review 3", None, None],
+        ["", "3/23 – 3/27", "", "", "Spring Break", None, None, None, ""],
+        ["", "4/2", "", "", "Asynchronous Day", "", "", "Portfolio 3", ""],
+        ["", "4/9", "", "", "Exam 3 - 70 MC", None, None, None, ""],
+        ["4/21", None, None, "Emotion", None, None, "Article Review 4", None, None],
+        ["", "4/23", "", "", "Optional Make-Up Exam", "", "", "Portfolio 4", ""],
+        ["4/28", None, None, "Final Exam Review", None, None, "", None, None],
+    ]]
+    final_text = "The final exam is on May 7th."
+    document = {
+        "text": final_text,
+        "pages": [
+            {"page": 2, "text": final_text, "tables": [], "source": "text"},
+            {"page": 5, "text": "", "tables": calendar, "source": "text"},
+        ],
+    }
+
+    candidates = extract_deadline_candidates(document, 2026)
+
+    assert [(row["Item"], row["Normalized Date"]) for row in candidates] == [
+        ("Article Review 1", "2026-02-03"),
+        ("Portfolio 1", "2026-02-05"),
+        ("Exam 1 - 35 MC", "2026-02-10"),
+        ("Article Review 2", "2026-02-26"),
+        ("Portfolio 2", "2026-03-03"),
+        ("Exam 2 - 50 MC", "2026-03-05"),
+        ("Article Review 3", "2026-03-19"),
+        ("Portfolio 3", "2026-04-02"),
+        ("Exam 3 - 70 MC", "2026-04-09"),
+        ("Article Review 4", "2026-04-21"),
+        ("Portfolio 4", "2026-04-23"),
+        ("Final Exam", "2026-05-07"),
+    ]
+    assert all(row["Confidence"] == "High" for row in candidates)
+    assert "Syllabus and Introduction" not in {
+        row["Item"] for row in candidates
+    }
+    assert "Optional Make-Up Exam" not in {
+        row["Item"] for row in candidates
+    }
 
 
 @pytest.mark.parametrize("day,date", [("F", "11-Oct"), ("M", "4-Nov")])

@@ -38,3 +38,32 @@ def test_logged_in_identity_requires_stable_subject():
             "is_logged_in": True,
             "email": "student@example.com",
         })
+
+
+def test_guest_choice_and_dialog_request_update_session_state(monkeypatch):
+    state = {}
+    monkeypatch.setattr(auth.st, "session_state", state)
+
+    auth.request_sign_in_dialog()
+    assert state[auth.AUTH_DIALOG_REQUESTED_KEY]
+
+    auth.continue_as_guest()
+    assert state[auth.AUTH_CHOICE_RESOLVED_KEY]
+    assert not state[auth.AUTH_DIALOG_REQUESTED_KEY]
+
+
+def test_auth_configuration_requires_every_google_setting(monkeypatch):
+    configured = {
+        "redirect_uri": "http://localhost:8501/oauth2callback",
+        "cookie_secret": "secret",
+        "client_id": "client",
+        "client_secret": "client-secret",
+        "server_metadata_url": "https://accounts.google.com/metadata",
+    }
+    monkeypatch.setattr(auth.st, "secrets", {"auth": configured})
+    assert auth.auth_is_configured()
+
+    incomplete = dict(configured)
+    incomplete.pop("client_secret")
+    monkeypatch.setattr(auth.st, "secrets", {"auth": incomplete})
+    assert not auth.auth_is_configured()

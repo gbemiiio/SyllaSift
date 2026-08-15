@@ -15,6 +15,32 @@ class ExtractedDocument(TypedDict, total=False):
     notices: list[str]
 
 
+class DateChoice(TypedDict):
+    label: str
+    normalized_date: str
+
+
+class MultipleDateAssessment(TypedDict, total=False):
+    item: str
+    choices: list[DateChoice]
+    page: Optional[int]
+    source: str
+
+
+class UnresolvedAssessment(TypedDict, total=False):
+    item: str
+    date_range: str
+    page: Optional[int]
+    source: str
+    message: str
+
+
+class DeadlineReview(TypedDict):
+    candidates: list["DeadlineCandidate"]
+    multiple_date_assessments: list[MultipleDateAssessment]
+    unresolved_assessments: list[UnresolvedAssessment]
+
+
 DeadlineCandidate = TypedDict(
     "DeadlineCandidate",
     {

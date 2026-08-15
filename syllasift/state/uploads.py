@@ -14,6 +14,7 @@ UPLOAD_WIDGET_PREFIXES = (
     "year_",
     "include_",
     "deadline_editor_",
+    "deadline_choice_",
     "remove_",
 )
 
