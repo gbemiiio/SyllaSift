@@ -73,8 +73,36 @@ def detect_course_code(text):
     )
     if explicit_match:
         return normalize_course_code(explicit_match.group(1))
-    match = re.search(COURSE_CODE_PATTERN, text, re.IGNORECASE)
-    return normalize_course_code(match.group()) if match else ""
+    rejected_context = re.compile(
+        r"\b(?:prerequisites?|corequisites?|office|room|location|meets?|"
+        r"meeting|classroom|web)\b",
+        re.IGNORECASE,
+    )
+    preferred_context = re.compile(
+        r"\b(?:course|syllabus|section|catalog|title)\b",
+        re.IGNORECASE,
+    )
+    candidates = []
+    offset = 0
+    for line_number, line in enumerate(text.splitlines()[:250]):
+        for match in re.finditer(COURSE_CODE_PATTERN, line, re.IGNORECASE):
+            prefix = line[:match.start()]
+            if rejected_context.search(prefix):
+                continue
+            score = 0
+            if line_number < 15:
+                score += 100 - line_number
+            elif line_number < 60:
+                score += 30
+            if preferred_context.search(line):
+                score += 75
+            if re.search(r"^\s*" + COURSE_CODE_PATTERN, line, re.IGNORECASE):
+                score += 40
+            candidates.append((score, -(offset + match.start()), match.group()))
+        offset += len(line) + 1
+    if not candidates:
+        return ""
+    return normalize_course_code(max(candidates)[2])
 
 
 def clean_course_title(title):
@@ -187,6 +215,15 @@ def detect_course_name(text, course_code=""):
 
 def detect_term(text, filename=""):
     match = re.search(TERM_PATTERN, text, re.IGNORECASE)
+    year_first = False
+    if not match:
+        match = re.search(
+            r"\b(20\d{2})[\s_-]+(Spring|Summer|Fall|Autumn|Winter)"
+            r"(?:\s+Semester)?\b",
+            text,
+            re.IGNORECASE,
+        )
+        year_first = bool(match)
     if not match:
         match = re.search(
             r"(Spring|Summer|Fall|Autumn|Winter)[\s_-]*(20\d{2})",
@@ -194,9 +231,19 @@ def detect_term(text, filename=""):
             re.IGNORECASE,
         )
         if not match:
-            return "", datetime.now().year
-    semester = match.group(1).title()
-    return ("Fall" if semester == "Autumn" else semester), int(match.group(2))
+            match = re.search(
+                r"(20\d{2})[\s_-]+(Spring|Summer|Fall|Autumn|Winter)",
+                filename,
+                re.IGNORECASE,
+            )
+            year_first = bool(match)
+            if not match:
+                return "", datetime.now().year
+    semester_group, year_group = ((2, 1) if year_first else (1, 2))
+    semester = match.group(semester_group).title()
+    return ("Fall" if semester == "Autumn" else semester), int(
+        match.group(year_group)
+    )
 
 
 def detect_course_metadata(text, filename=""):

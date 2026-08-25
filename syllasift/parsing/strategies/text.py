@@ -9,6 +9,7 @@ from ..classification import (
     nearby_context_is_excluded,
 )
 from ..common import append_deadline, candidate_row, get_lines
+from ..dates import course_year_context
 from ..patterns import (
     ASSESSMENT_WORDS,
     DATE_PATTERN,
@@ -57,6 +58,21 @@ def extract_due_markers(text, course_year, page_number=None):
 
         item = clean_schedule_item("\n".join(block))
         if not item:
+            if clean_schedule_item(line[:due_match.start()]):
+                continue
+            row = candidate_row(
+                "Unlabeled deadline",
+                due_match.group(1),
+                course_year,
+                "Low",
+                "Due date has no assignment context",
+                False,
+            )
+            if row:
+                key = (row["Item"].lower(), row["Normalized Date"])
+                if key not in seen:
+                    seen.add(key)
+                    deadlines.append(row)
             continue
 
         append_deadline(
@@ -187,7 +203,10 @@ def extract_release_due_deadlines(text, course_year):
             pending_date = None
             continue
 
-        if not inside_table or not line:
+        if not inside_table:
+            continue
+        if not line:
+            pending_date = None
             continue
 
         date_matches = list(
@@ -212,12 +231,18 @@ def extract_release_due_deadlines(text, course_year):
             continue
 
         if pending_date:
+            if date_matches or re.fullmatch(r"[A-Z][A-Z /&-]{3,}", line):
+                pending_date = None
+                continue
             item = re.sub(r"\s+\d+(?:\.\d+)?%.*$", "", line).strip()
 
             if item.lower().startswith("final section"):
                 item = "Final Exam"
 
-            if item:
+            if item and (
+                line_looks_like_assessment(item)
+                or item.lower().startswith("final section")
+            ):
                 append_deadline(
                     deadlines,
                     seen,
@@ -230,7 +255,8 @@ def extract_release_due_deadlines(text, course_year):
     return deadlines
 
 
-def extract_deadlines(text, course_year):
+def extract_deadlines(text, course_year, semester=None):
+    course_year = course_year_context(course_year, semester)
     lines = get_lines(text)
 
     # First extract structured exam lists.

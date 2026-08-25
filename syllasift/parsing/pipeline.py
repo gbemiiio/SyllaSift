@@ -1,5 +1,6 @@
 import re
 
+from .dates import course_year_context
 from .classification import (
     candidate_is_duplicate,
     candidate_item_is_excluded,
@@ -35,8 +36,9 @@ from .strategies.text import (
 )
 
 
-def extract_deadline_review(document, course_year):
+def extract_deadline_review(document, course_year, semester=None):
     """Return exact candidates plus choices and unresolved date warnings."""
+    course_year = course_year_context(course_year, semester)
     candidates = extract_deadline_candidates(document, course_year)
     if isinstance(document, str):
         pages = [{
@@ -61,8 +63,9 @@ def extract_deadline_review(document, course_year):
     }
 
 
-def extract_deadline_candidates(document, course_year):
+def extract_deadline_candidates(document, course_year, semester=None):
     """Return reviewable deadline suggestions with source information."""
+    course_year = course_year_context(course_year, semester)
     if isinstance(document, str):
         pages = [{"page": None, "text": document, "tables": []}]
     else:

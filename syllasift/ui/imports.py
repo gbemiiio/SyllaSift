@@ -6,6 +6,7 @@ import streamlit as st
 from syllasift.auth import request_sign_in_dialog
 from syllasift.calendar.ics import build_ics_calendar
 from syllasift.parsing import extract_deadline_review, extract_deadlines
+from syllasift.parsing.dates import course_year_context
 from syllasift.config import (
     NO_DATED_ASSIGNMENTS_MESSAGE,
     PREVIEW_COLUMNS,
@@ -22,12 +23,17 @@ from syllasift.state.uploads import (
     uploader_widget_key,
 )
 from syllasift.state.widgets import reset_deadline_and_export_state
-from syllasift.storage.database import save_course, save_deadlines
+from syllasift.storage.database import upsert_course_with_deadlines
 
 
 def clean_uploaded_filename(filename: str) -> str:
     first_pdf_end = filename.lower().find(".pdf")
     return filename[:first_pdf_end + 4] if first_pdf_end >= 0 else filename
+
+
+def _guest_uid(*parts) -> str:
+    identity = "|".join(str(part).strip().casefold() for part in parts)
+    return f"guest-{uuid.uuid5(uuid.NAMESPACE_URL, identity)}@syllasift.local"
 
 
 def _clear_uploaded_syllabi() -> None:
@@ -40,9 +46,11 @@ def _display_import_result() -> None:
     if not result:
         return
     if result["courses"]:
+        course_summary = f"Imported {result['courses']} course(s)"
+        if result.get("reused_courses"):
+            course_summary += f" ({result['reused_courses']} merged)"
         st.success(
-            f"Imported {result['courses']} course(s) and "
-            f"{result['deadlines']} deadline(s)."
+            f"{course_summary} and {result['deadlines']} new deadline(s)."
         )
     for error in result["errors"]:
         st.error(error)
@@ -109,7 +117,9 @@ def _render_pending_syllabus(syllabus):
                 key=f"year_{upload_id}",
             )
 
-        review = extract_deadline_review(syllabus["document"], int(year))
+        review = extract_deadline_review(
+            syllabus["document"], course_year_context(int(year), semester)
+        )
         candidates = review["candidates"]
         multiple_date_assessments = review["multiple_date_assessments"]
         unresolved_assessments = review["unresolved_assessments"]
@@ -221,17 +231,23 @@ def _calendar_deadlines(entries):
     calendar_rows = []
     for entry in entries:
         if (
-            not entry
-            or not entry["include"]
-            or entry["review_errors"]
-            or not entry["course_name"].strip()
+            not _entry_is_importable(entry)
         ):
             continue
-        for index, deadline in enumerate(entry["deadlines"]):
+        for deadline in entry["deadlines"]:
+            course_identity = (
+                entry["course_code"] or entry["course_name"]
+            ).strip().casefold()
+            event_uid = _guest_uid(
+                entry["upload_id"],
+                course_identity,
+                entry["semester"],
+                entry["year"],
+                deadline["Item"],
+                deadline["Normalized Date"],
+            )
             calendar_rows.append({
-                "event_uid": (
-                    f"guest-{entry['upload_id']}-{index}@syllasift.local"
-                ),
+                "event_uid": event_uid,
                 "course_name": entry["course_name"].strip(),
                 "course_code": entry["course_code"].strip() or None,
                 "semester": entry["semester"],
@@ -242,10 +258,20 @@ def _calendar_deadlines(entries):
     return calendar_rows
 
 
+def _entry_is_importable(entry):
+    return bool(
+        entry
+        and entry["include"]
+        and entry["course_name"].strip()
+        and not entry["review_errors"]
+    )
+
+
 def _import_entries(entries, user_id) -> None:
     imported_ids = []
     imported_courses = 0
     imported_deadlines = 0
+    reused_courses = 0
     errors = []
     for entry in entries:
         if not entry or not entry["include"]:
@@ -260,18 +286,18 @@ def _import_entries(entries, user_id) -> None:
             )
             continue
         try:
-            course_id = save_course(
+            result = upsert_course_with_deadlines(
                 user_id,
                 entry["course_name"].strip(),
                 entry["course_code"].strip() or None,
                 entry["semester"],
                 entry["year"],
+                entry["deadlines"],
             )
-            if entry["deadlines"]:
-                save_deadlines(user_id, course_id, entry["deadlines"])
             imported_ids.append(entry["upload_id"])
             imported_courses += 1
-            imported_deadlines += len(entry["deadlines"])
+            imported_deadlines += result["deadlines_inserted"]
+            reused_courses += int(not result["course_created"])
         except Exception as error:
             errors.append(f"{entry['filename']}: {error}")
 
@@ -282,6 +308,7 @@ def _import_entries(entries, user_id) -> None:
     st.session_state["pdf_import_result"] = {
         "courses": imported_courses,
         "deadlines": imported_deadlines,
+        "reused_courses": reused_courses,
         "errors": errors,
     }
     st.rerun()
@@ -329,7 +356,7 @@ def display_pdf_import(user) -> None:
     if not pending:
         return
     entries = [_render_pending_syllabus(syllabus) for syllabus in pending]
-    selected_count = sum(bool(entry and entry["include"]) for entry in entries)
+    selected_count = sum(_entry_is_importable(entry) for entry in entries)
     calendar_deadlines = _calendar_deadlines(entries)
     st.download_button(
         "Download reviewed deadlines (.ics)",
@@ -360,8 +387,13 @@ def display_pdf_import(user) -> None:
 def _manual_calendar_deadlines(draft, deadlines):
     return [
         {
-            "event_uid": (
-                f"guest-manual-{draft['draft_id']}-{index}@syllasift.local"
+            "event_uid": _guest_uid(
+                draft["draft_id"],
+                draft.get("course_code") or draft["course_name"],
+                draft["semester"],
+                draft["year"],
+                deadline["Item"],
+                deadline["Normalized Date"],
             ),
             "course_name": draft["course_name"],
             "course_code": draft["course_code"],
@@ -370,7 +402,7 @@ def _manual_calendar_deadlines(draft, deadlines):
             "item": deadline["Item"],
             "due_date": deadline["Normalized Date"],
         }
-        for index, deadline in enumerate(deadlines)
+        for deadline in deadlines
     ]
 
 
@@ -420,7 +452,9 @@ def display_manual_import(user) -> None:
                 "course_code": course_code.strip() or None,
                 "semester": semester,
                 "year": int(course_year),
-                "deadlines": extract_deadlines(syllabus_text, int(course_year)),
+                "deadlines": extract_deadlines(
+                    syllabus_text, int(course_year), semester
+                ),
             }
             st.session_state.pop("manual_deadline_editor", None)
 
@@ -486,22 +520,19 @@ def display_manual_import(user) -> None:
                 disabled=invalid_rows,
                 type="primary",
             ):
-                course_id = save_course(
+                result = upsert_course_with_deadlines(
                     user.user_id,
                     draft["course_name"],
                     draft["course_code"],
                     draft["semester"],
                     draft["year"],
+                    reviewed_deadlines,
                 )
-                if reviewed_deadlines:
-                    save_deadlines(
-                        user.user_id, course_id, reviewed_deadlines
-                    )
                 reset_deadline_and_export_state(st.session_state)
                 st.session_state.pop("manual_import_draft", None)
                 st.session_state["clear_manual_form_on_next_run"] = True
                 st.session_state["manual_import_notice"] = (
-                    f"Saved {len(reviewed_deadlines)} deadlines."
+                    f"Saved {result['deadlines_inserted']} new deadlines."
                 )
                 st.rerun()
         else:

@@ -53,7 +53,7 @@ def build_ics_calendar(deadlines, generated_at=None):
         "METHOD:PUBLISH",
         "X-WR-CALNAME:SyllaSift Deadlines",
     ]
-    for index, deadline in enumerate(deadlines):
+    for deadline in deadlines:
         due_date = parse_due_date(deadline["due_date"])
         end_date = due_date + timedelta(days=1)
         course_label = deadline.get("course_code") or deadline["course_name"]
@@ -76,7 +76,8 @@ def build_ics_calendar(deadlines, generated_at=None):
                 str(deadline.get("course_code") or deadline["course_name"]),
                 str(deadline["item"]),
                 str(deadline["due_date"]),
-                str(index),
+                str(deadline.get("semester", "")),
+                str(deadline.get("year", "")),
             ])
             uid = f"guest-{uuid.uuid5(uuid.NAMESPACE_URL, identity)}@syllasift.local"
         lines.extend([

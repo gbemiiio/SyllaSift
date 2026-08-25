@@ -35,7 +35,7 @@ def get_ocr_engine():
 
 
 def page_needs_ocr(page, page_text):
-    if len(page_text.strip()) >= 80 or not page.images:
+    if not page.images:
         return False
 
     page_area = float(page.width * page.height)
@@ -83,47 +83,68 @@ def extract_pdf_document(uploaded_file):
     uploaded_file.seek(0)
     pdf_bytes = uploaded_file.read()
 
+    plumber_error = None
     if pdfplumber is not None:
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            for page_number, page in enumerate(pdf.pages, start=1):
-                page_text = page.extract_text() or ""
-                tables = page.extract_tables() or []
-                source = "text"
-                ocr_words = []
+        try:
+            with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+                for page_number, page in enumerate(pdf.pages, start=1):
+                    native_text = page.extract_text() or ""
+                    page_text = native_text
+                    tables = page.extract_tables() or []
+                    source = "text"
+                    ocr_words = []
 
-                if page_needs_ocr(page, page_text):
-                    ocr_text, ocr_words = extract_ocr_page(
-                        pdf_bytes,
-                        page_number - 1,
-                    )
-                    if ocr_text.strip():
-                        page_text = ocr_text
-                        source = "ocr"
+                    if page_needs_ocr(page, native_text):
+                        ocr_text, ocr_words = extract_ocr_page(
+                            pdf_bytes,
+                            page_number - 1,
+                        )
+                        if ocr_text.strip():
+                            if native_text.strip():
+                                native_lines = {
+                                    line.strip().casefold()
+                                    for line in native_text.splitlines()
+                                    if line.strip()
+                                }
+                                additions = [
+                                    line for line in ocr_text.splitlines()
+                                    if line.strip().casefold() not in native_lines
+                                ]
+                                if additions:
+                                    page_text = (
+                                        native_text + "\n" + "\n".join(additions)
+                                    )
+                                    source = "mixed"
+                            else:
+                                page_text = ocr_text
+                                source = "ocr"
 
-                pages.append(
-                    {
+                    pages.append({
                         "page": page_number,
                         "text": page_text,
                         "tables": tables,
                         "source": source,
                         "ocr_words": ocr_words,
-                    }
-                )
+                    })
+        except Exception as error:
+            pages = []
+            plumber_error = error
 
     if not pages:
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-
-        for page_number, page in enumerate(reader.pages, start=1):
-            page_text = page.extract_text() or ""
-            pages.append(
-                {
+        try:
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+            for page_number, page in enumerate(reader.pages, start=1):
+                page_text = page.extract_text() or ""
+                pages.append({
                     "page": page_number,
                     "text": page_text,
                     "tables": [],
                     "source": "text",
                     "ocr_words": [],
-                }
-            )
+                })
+        except Exception as error:
+            detail = str(error or plumber_error or "unknown PDF error")
+            raise ValueError(f"Unable to read this PDF: {detail}") from error
 
     combined_text = "\n".join(page["text"] for page in pages)
     notices = detect_platform_notices(combined_text)

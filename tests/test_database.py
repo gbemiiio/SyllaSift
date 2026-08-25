@@ -183,6 +183,57 @@ def test_legacy_rows_are_preserved_but_hidden_after_migration(
         assert connection.execute(
             "SELECT item, user_id FROM deadlines"
         ).fetchall() == [("Legacy Exam", None)]
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
     finally:
         connection.close()
+
+
+def test_reimport_merges_deadlines_and_preserves_completion(tmp_path, monkeypatch):
+    _, user_id, _ = initialized_database(tmp_path, monkeypatch)
+    first = database.upsert_course_with_deadlines(
+        user_id, "Biology", "BIO-101", "Fall", 2026,
+        [deadline("Lab", "2026-09-01")],
+    )
+    saved_id = database.get_deadlines(user_id, first["course_id"])[0][0]
+    assert database.update_deadline_status(user_id, saved_id, True)
+
+    second = database.upsert_course_with_deadlines(
+        user_id, "Biology renamed", "BIO 101", "fall", 2026,
+        [deadline("Lab", "2026-09-01"), deadline("Exam", "2026-10-01")],
+    )
+
+    assert not second["course_created"]
+    assert second["deadlines_inserted"] == 1
+    assert database.get_dashboard_stats(user_id) == (1, 2, 1)
+
+
+def test_v1_migration_consolidates_owned_duplicates(tmp_path, monkeypatch):
+    test_database, user_id, _ = initialized_database(tmp_path, monkeypatch)
+    connection = sqlite3.connect(str(test_database))
+    connection.execute("DROP INDEX uq_courses_owned_identity")
+    connection.execute("DROP INDEX uq_deadlines_owned_identity")
+    connection.execute("PRAGMA user_version = 1")
+    first = connection.execute(
+        "INSERT INTO courses (user_id, course_name, course_code, semester, year) VALUES (?, 'Biology', 'BIO 101', 'Fall', 2026)",
+        (user_id,),
+    ).lastrowid
+    second = connection.execute(
+        "INSERT INTO courses (user_id, course_name, course_code, semester, year) VALUES (?, 'Biology', 'BIO-101', 'fall', 2026)",
+        (user_id,),
+    ).lastrowid
+    connection.execute(
+        "INSERT INTO deadlines (user_id, course_id, item, due_date) VALUES (?, ?, 'Exam', '2026-10-01')",
+        (user_id, first),
+    )
+    connection.execute(
+        "INSERT INTO deadlines (user_id, course_id, item, due_date, is_completed, completed_at) VALUES (?, ?, ' exam ', '2026-10-01', 1, '2026-09-30 12:00:00')",
+        (user_id, second),
+    )
+    connection.commit()
+    connection.close()
+
+    database.initialize_database()
+
+    assert database.get_dashboard_stats(user_id) == (1, 1, 1)
+    course_id = database.get_course_options(user_id)[0][0]
+    assert database.get_deadlines(user_id, course_id)[0][7] == "2026-09-30 12:00:00"

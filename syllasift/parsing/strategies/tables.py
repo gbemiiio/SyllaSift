@@ -40,24 +40,26 @@ def extract_course_calendar_deadlines(tables, course_year):
         date_index = date_indexes[0]
         topic_index = topic_indexes[0]
         assignment_index = assignment_indexes[0]
-        topic_start = (date_index + topic_index) // 2 + 1
-        assignment_start = (topic_index + assignment_index) // 2 + 1
+
+        def column_cell(cells, target_index):
+            if target_index < len(cells) and cells[target_index]:
+                return cells[target_index]
+            nearby = [
+                (abs(index - target_index), index, cell)
+                for index, cell in enumerate(cells)
+                if cell and abs(index - target_index) == 1
+            ]
+            return min(nearby)[2] if nearby else ""
 
         for row in table[1:]:
             cells = [str(cell or "").strip() for cell in (row or [])]
-            raw_date = next(
-                (
-                    cell for cell in cells
-                    if re.fullmatch(DATE_PATTERN, cell, re.IGNORECASE)
-                ),
-                "",
-            )
+            raw_date = column_cell(cells, date_index)
+            date_match = re.search(DATE_PATTERN, raw_date, re.IGNORECASE)
+            raw_date = date_match.group() if date_match else ""
             if not raw_date:
                 continue
 
-            assignment_text = "\n".join(
-                cell for cell in cells[assignment_start:] if cell
-            )
+            assignment_text = column_cell(cells, assignment_index)
             for assignment in get_lines(assignment_text):
                 item = clean_explicit_item(assignment)
                 if item and not line_is_excluded(item):
@@ -65,9 +67,7 @@ def extract_course_calendar_deadlines(tables, course_year):
                         deadlines, seen, item, raw_date, course_year,
                     )
 
-            topic_text = " ".join(
-                cell for cell in cells[topic_start:assignment_start] if cell
-            )
+            topic_text = column_cell(cells, topic_index)
             item = clean_explicit_item(topic_text)
             if scheduled_event_kind(item) == "exam":
                 item = re.sub(r"\s*[–—]\s*", " - ", item)

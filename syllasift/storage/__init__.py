@@ -10,6 +10,7 @@ from .database import (
     save_course,
     save_deadlines,
     update_deadline_status,
+    upsert_course_with_deadlines,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "save_course",
     "save_deadlines",
     "update_deadline_status",
+    "upsert_course_with_deadlines",
 ]

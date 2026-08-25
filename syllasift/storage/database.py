@@ -3,7 +3,7 @@ import uuid
 
 
 DATABASE_NAME = "SyllaSift.db"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def get_connection():
@@ -77,6 +77,97 @@ def _create_schema(connection):
         ON deadlines(user_id, course_id)
         """
     )
+
+
+def _create_uniqueness_indexes(connection):
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_courses_owned_identity
+        ON courses(
+            user_id,
+            CASE
+                WHEN trim(coalesce(course_code, '')) <> '' THEN
+                    'code:' || lower(replace(replace(trim(course_code), '-', ''), ' ', ''))
+                ELSE 'name:' || lower(trim(course_name))
+            END,
+            lower(trim(semester)), year
+        )
+        WHERE user_id IS NOT NULL
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_deadlines_owned_identity
+        ON deadlines(user_id, course_id, lower(trim(item)), due_date)
+        WHERE user_id IS NOT NULL
+        """
+    )
+
+
+def _course_identity(course_name, course_code, semester, year):
+    code = "".join(
+        character for character in str(course_code or "").casefold()
+        if character not in {" ", "-"}
+    )
+    label = (
+        f"code:{code}" if code
+        else f"name:{str(course_name).strip().casefold()}"
+    )
+    return label, str(semester).strip().casefold(), int(year)
+
+
+def _deduplicate_owned_data(connection):
+    courses = connection.execute(
+        """
+        SELECT course_id, user_id, course_name, course_code, semester, year
+        FROM courses WHERE user_id IS NOT NULL ORDER BY course_id
+        """
+    ).fetchall()
+    survivors = {}
+    for course_id, user_id, name, code, semester, year in courses:
+        key = (user_id, *_course_identity(name, code, semester, year))
+        survivor = survivors.setdefault(key, course_id)
+        if survivor != course_id:
+            connection.execute(
+                """
+                UPDATE deadlines SET course_id = ?
+                WHERE course_id = ? AND user_id = ?
+                """,
+                (survivor, course_id, user_id),
+            )
+            connection.execute(
+                "DELETE FROM courses WHERE course_id = ? AND user_id = ?",
+                (course_id, user_id),
+            )
+
+    groups = connection.execute(
+        """
+        SELECT user_id, course_id, lower(trim(item)), due_date,
+               min(deadline_id), max(is_completed), min(completed_at)
+        FROM deadlines WHERE user_id IS NOT NULL
+        GROUP BY user_id, course_id, lower(trim(item)), due_date
+        HAVING count(*) > 1
+        """
+    ).fetchall()
+    for (
+        user_id, course_id, item_key, due_date,
+        survivor, completed, completed_at,
+    ) in groups:
+        connection.execute(
+            """
+            UPDATE deadlines SET is_completed = ?, completed_at = ?
+            WHERE deadline_id = ?
+            """,
+            (completed, completed_at if completed else None, survivor),
+        )
+        connection.execute(
+            """
+            DELETE FROM deadlines
+            WHERE user_id = ? AND course_id = ? AND lower(trim(item)) = ?
+              AND due_date = ? AND deadline_id <> ?
+            """,
+            (user_id, course_id, item_key, due_date, survivor),
+        )
 
 
 def _create_ownership_triggers(connection):
@@ -179,9 +270,12 @@ def initialize_database():
             )
         if version < SCHEMA_VERSION:
             _migrate_legacy_schema(connection)
+            _deduplicate_owned_data(connection)
+            _create_uniqueness_indexes(connection)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         else:
             _create_schema(connection)
+            _create_uniqueness_indexes(connection)
         _create_ownership_triggers(connection)
         connection.commit()
     except Exception:
@@ -289,6 +383,72 @@ def save_deadlines(user_id, course_id, table_rows):
             ],
         )
         connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def upsert_course_with_deadlines(
+    user_id, course_name, course_code, semester, year, table_rows,
+):
+    """Atomically reuse/create a course and add only unseen deadlines."""
+    _require_user_id(user_id)
+    identity = _course_identity(course_name, course_code, semester, year)
+    connection = get_connection()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        courses = connection.execute(
+            """
+            SELECT course_id, course_name, course_code, semester, year
+            FROM courses WHERE user_id = ? ORDER BY course_id
+            """,
+            (user_id,),
+        ).fetchall()
+        existing = next(
+            (
+                row for row in courses
+                if _course_identity(row[1], row[2], row[3], row[4]) == identity
+            ),
+            None,
+        )
+        created = existing is None
+        if created:
+            cursor = connection.execute(
+                """
+                INSERT INTO courses (
+                    user_id, course_name, course_code, semester, year
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (user_id, course_name, course_code, semester, year),
+            )
+            course_id = cursor.lastrowid
+        else:
+            course_id = existing[0]
+
+        inserted = 0
+        for row in table_rows:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO deadlines (
+                    user_id, course_id, item, raw_date, due_date,
+                    is_completed, completed_at
+                ) VALUES (?, ?, ?, ?, ?, 0, NULL)
+                """,
+                (
+                    user_id, course_id, row["Item"], row["Date"],
+                    row["Normalized Date"],
+                ),
+            )
+            inserted += cursor.rowcount
+        connection.commit()
+        return {
+            "course_id": course_id,
+            "course_created": created,
+            "deadlines_inserted": inserted,
+            "deadlines_skipped": len(table_rows) - inserted,
+        }
     except Exception:
         connection.rollback()
         raise

@@ -152,29 +152,21 @@ def extract_exam_list(lines, course_year):
 
                 continue
 
+            if "final exam" in lowered and not line_is_excluded(line):
+                date_match = re.search(DATE_PATTERN, line, re.IGNORECASE)
+                if date_match:
+                    append_deadline(
+                        deadlines,
+                        seen,
+                        "Final Exam",
+                        date_match.group(),
+                        course_year,
+                    )
+                    continue
+
             remaining_exam_lines -= 1
 
             if remaining_exam_lines <= 0:
                 inside_exam_list = False
-
-        if (
-            inside_exam_list
-            and "final exam" in lowered
-            and not line_is_excluded(line)
-        ):
-            date_match = re.search(
-                DATE_PATTERN,
-                line,
-                re.IGNORECASE,
-            )
-
-            if date_match:
-                append_deadline(
-                    deadlines,
-                    seen,
-                    "Final Exam",
-                    date_match.group(),
-                    course_year,
-                )
 
     return deadlines

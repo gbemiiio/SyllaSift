@@ -2,14 +2,11 @@ import re
 
 
 def word_to_number(value):
-    values = {
-        "one": 1,
-        "two": 2,
-        "three": 3,
-        "four": 4,
-        "five": 5,
-        "six": 6,
-    }
+    words = (
+        "zero one two three four five six seven eight nine ten eleven twelve "
+        "thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty"
+    ).split()
+    values = {word: number for number, word in enumerate(words)}
     return int(value) if value.isdigit() else values.get(value.lower(), 0)
 
 
@@ -27,7 +24,9 @@ def extract_relative_deadlines(text, candidates):
             exams[int(match.group(1))] = candidate["Normalized Date"]
 
     homework_match = re.search(
-        r"(?:There are\s+)?(\d+|one|two|three|four|five|six)\s+sets?\s+of\s+homework"
+        r"(?:There are\s+)?(\d+|zero|one|two|three|four|five|six|seven|eight|"
+        r"nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
+        r"eighteen|nineteen|twenty)\s+sets?\s+of\s+homework"
         r".*?corresponding\s+to\s+the\s+(?:\w+\s+)?exams?",
         text,
         re.IGNORECASE | re.DOTALL,
@@ -45,7 +44,9 @@ def extract_relative_deadlines(text, candidates):
                 )
 
     submission_match = re.search(
-        r"(\d+|one|two|three|four|five|six)\s+submissions?.{0,160}?"
+        r"(\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+        r"twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|"
+        r"twenty)\s+submissions?.{0,160}?"
         r"due\s+on\s+each\s+exam\s+day",
         text,
         re.IGNORECASE | re.DOTALL,

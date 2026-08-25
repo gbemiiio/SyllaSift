@@ -15,7 +15,7 @@ def pending(upload_id):
         },
         "metadata": {
             "course_name": f"Course {upload_id}",
-            "course_code": "TEST 1000",
+            "course_code": f"{upload_id[:5].upper()} 1000",
             "semester": "Fall",
             "year": 2026,
         },
@@ -273,13 +273,17 @@ def test_pdf_review_requires_one_date_choice_and_warns_for_ranges(
             }],
         },
     )
-    app = app_with_pending(tmp_path, monkeypatch, ["urban"])
+    app = app_with_pending(tmp_path, monkeypatch, ["urban"], signed_in=True)
 
-    assert [warning.value for warning in app.warning] == [
+    range_warning = next(
+        warning.value for warning in app.warning
+        if "specific dates" in warning.value
+    )
+    assert range_warning == (
         "Some assignments do not have specific dates in this syllabus. "
         "Check Canvas for the specific due dates."
-    ]
-    assert "Final Exam" not in app.warning[0].value
+    )
+    assert "Final Exam" not in range_warning
     choice = app.selectbox(key="deadline_choice_0_urban")
     assert choice.value is None
     reviewed_download = next(
@@ -287,6 +291,11 @@ def test_pdf_review_requires_one_date_choice_and_warns_for_ranges(
         if item.label == "Download reviewed deadlines (.ics)"
     )
     assert reviewed_download.disabled
+    import_button = next(
+        button for button in app.button
+        if button.label == "Import 0 course(s)"
+    )
+    assert import_button.disabled
 
     choice.select("June 30 (2026-06-30)").run(timeout=30)
 
@@ -298,6 +307,10 @@ def test_pdf_review_requires_one_date_choice_and_warns_for_ranges(
         if item.label == "Download reviewed deadlines (.ics)"
     )
     assert not reviewed_download.disabled
+    assert next(
+        button for button in app.button
+        if button.label == "Import 1 course(s)"
+    ).disabled is False
 
 
 def test_structured_calendar_assignments_reach_export_and_saved_course(

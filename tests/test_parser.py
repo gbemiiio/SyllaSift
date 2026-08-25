@@ -1,4 +1,6 @@
 import pytest
+import io
+import importlib
 from types import SimpleNamespace
 
 from parser import (
@@ -37,6 +39,47 @@ def test_date_normalization(date_text, course_year, expected):
 def test_invalid_dates_raise_value_error(date_text):
     with pytest.raises(ValueError):
         normalize_date(date_text, 2025)
+
+
+def test_fall_yearless_dates_roll_into_next_calendar_year():
+    assert normalize_date("January 5", 2026, "Fall") == "2027-01-05"
+    assert normalize_date("December 5", 2026, "Fall") == "2026-12-05"
+    assert normalize_date("January 5, 2026", 2026, "Fall") == "2026-01-05"
+    assert normalize_date("January 5", 2026, "Spring") == "2026-01-05"
+
+
+def test_metadata_ignores_contextual_codes_and_accepts_year_first_term():
+    text = """
+    Prerequisite: CS 100
+    Office: COE 301
+    Meets in WEB 123
+    CS 3600 Introduction to Artificial Intelligence
+    2019 Fall Semester
+    """
+    metadata = detect_course_metadata(text)
+    assert metadata["course_code"] == "CS 3600"
+    assert metadata["course_name"] == "Introduction to Artificial Intelligence"
+    assert metadata["semester"] == "Fall"
+    assert metadata["year"] == 2019
+
+
+def test_noncontiguous_course_calendar_columns_do_not_mix_cells():
+    document = {"text": "", "pages": [{"page": 1, "text": "", "tables": [[
+        ["Date", "Week", "Topic", "Notes", "Assignment"],
+        ["September 5", "2", "Exam 1", "Bring pencil", "Homework 1"],
+    ]]}]}
+    rows = extract_deadline_candidates(document, 2026)
+    assert [(row["Item"], row["Normalized Date"]) for row in rows] == [
+        ("Exam 1", "2026-09-05"),
+        ("Homework 1", "2026-09-05"),
+    ]
+
+
+def test_unlabeled_due_marker_is_visible_but_unchecked():
+    rows = extract_deadline_candidates("Due: September 5", 2026)
+    assert rows[0]["Item"] == "Unlabeled deadline"
+    assert rows[0]["Confidence"] == "Low"
+    assert rows[0]["Include"] is False
 
 
 def test_ordinary_deadline_lines():
@@ -263,8 +306,65 @@ def test_ocr_detection_requires_little_text_and_large_image():
         images=[{"x0": 0, "x1": 20, "y0": 0, "y1": 20}],
     )
     assert page_needs_ocr(large, "short")
-    assert not page_needs_ocr(large, "x" * 100)
+    assert page_needs_ocr(large, "x" * 100)
     assert not page_needs_ocr(small, "short")
+
+
+def test_pdfplumber_failure_falls_back_to_pypdf(monkeypatch):
+    pdf_module = importlib.import_module("syllasift.parsing.pdf")
+
+    def fail_open(_stream):
+        raise RuntimeError("plumber failed")
+
+    fallback_page = SimpleNamespace(extract_text=lambda: "CS 101 Fall 2026")
+    monkeypatch.setattr(pdf_module, "pdfplumber", SimpleNamespace(open=fail_open))
+    monkeypatch.setattr(
+        pdf_module, "PdfReader", lambda _stream: SimpleNamespace(pages=[fallback_page])
+    )
+    document = pdf_module.extract_pdf_document(io.BytesIO(b"pdf"))
+    assert document["text"] == "CS 101 Fall 2026"
+
+
+def test_pdf_reader_failures_raise_concise_error(monkeypatch):
+    pdf_module = importlib.import_module("syllasift.parsing.pdf")
+    monkeypatch.setattr(
+        pdf_module, "pdfplumber",
+        SimpleNamespace(open=lambda _stream: (_ for _ in ()).throw(RuntimeError("bad"))),
+    )
+    monkeypatch.setattr(
+        pdf_module, "PdfReader",
+        lambda _stream: (_ for _ in ()).throw(RuntimeError("encrypted")),
+    )
+    with pytest.raises(ValueError, match="Unable to read this PDF"):
+        pdf_module.extract_pdf_document(io.BytesIO(b"pdf"))
+
+
+def test_embedded_image_ocr_is_merged_with_native_text(monkeypatch):
+    pdf_module = importlib.import_module("syllasift.parsing.pdf")
+    page = SimpleNamespace(
+        width=100, height=100,
+        images=[{"x0": 0, "x1": 80, "y0": 0, "y1": 80}],
+        extract_text=lambda: "Native syllabus text " * 8,
+        extract_tables=lambda: [],
+    )
+
+    class FakePdf:
+        pages = [page]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(pdf_module, "pdfplumber", SimpleNamespace(open=lambda _: FakePdf()))
+    monkeypatch.setattr(
+        pdf_module, "extract_ocr_page", lambda *_args: ("Final Exam January 5", [])
+    )
+    document = pdf_module.extract_pdf_document(io.BytesIO(b"pdf"))
+    assert "Native syllabus text" in document["text"]
+    assert "Final Exam January 5" in document["text"]
+    assert document["pages"][0]["source"] == "mixed"
 
 
 def test_relative_assignments_use_corresponding_exam_dates():
@@ -292,6 +392,33 @@ def test_relative_assignments_use_corresponding_exam_dates():
     ]
     assert ("Real-World Application 4", "2025-12-08") in [
         (row["Item"], row["Normalized Date"]) for row in candidates
+    ]
+
+
+def test_seven_relative_homework_sets_are_not_dropped():
+    exam_lines = "\n".join(
+        f"Exam {number} September {number}" for number in range(1, 8)
+    )
+    document = {
+        "text": "There are seven sets of homework corresponding to the exams.",
+        "pages": [{"page": 1, "tables": [], "text": exam_lines}],
+    }
+    candidates = extract_deadline_candidates(document, 2026)
+    assert "Homework Set 7" in {row["Item"] for row in candidates}
+
+
+def test_final_exam_on_last_lookahead_line_is_retained():
+    text = """
+    Midterm exams are on the following dates:
+    filler one
+    filler two
+    filler three
+    filler four
+    Final Exam December 12
+    """
+    rows = extract_deadlines(text, 2026)
+    assert ("Final Exam", "2026-12-12") in [
+        (row["Item"], row["Normalized Date"]) for row in rows
     ]
 
 
