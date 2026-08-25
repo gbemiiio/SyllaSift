@@ -55,7 +55,10 @@ def extract_ocr_page(pdf_bytes, page_index):
         return "", []
 
     pdf = pdfium.PdfDocument(pdf_bytes)
-    image = pdf[page_index].render(scale=2.5).to_pil()
+    try:
+        image = pdf[page_index].render(scale=2.5).to_pil()
+    finally:
+        pdf.close()
     result, _ = engine(np.array(image))
     words = []
 

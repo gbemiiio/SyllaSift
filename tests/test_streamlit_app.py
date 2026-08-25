@@ -243,6 +243,9 @@ def test_pdf_review_requires_one_date_choice_and_warns_for_ranges(
         "syllasift.ui.imports.extract_deadline_review",
         lambda document, year: {
             "candidates": [],
+            "warnings": [
+                'Skipped date text that could not be parsed: "13/45/2026".'
+            ],
             "multiple_date_assessments": [{
                 "item": "Midterm",
                 "choices": [
@@ -284,6 +287,9 @@ def test_pdf_review_requires_one_date_choice_and_warns_for_ranges(
         "Check Canvas for the specific due dates."
     )
     assert "Final Exam" not in range_warning
+    assert any(
+        "13/45/2026" in warning.value for warning in app.warning
+    )
     choice = app.selectbox(key="deadline_choice_0_urban")
     assert choice.value is None
     reviewed_download = next(
@@ -311,6 +317,22 @@ def test_pdf_review_requires_one_date_choice_and_warns_for_ranges(
         button for button in app.button
         if button.label == "Import 1 course(s)"
     ).disabled is False
+
+
+def test_pdf_review_exception_blocks_only_affected_entry(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "syllasift.ui.imports.extract_deadline_review",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("parser broke")),
+    )
+    app = app_with_pending(tmp_path, monkeypatch, ["broken"], signed_in=True)
+
+    assert not app.exception
+    assert any("Deadline review failed" in error.value for error in app.error)
+    button = next(
+        button for button in app.button
+        if button.label == "Import 0 course(s)"
+    )
+    assert button.disabled
 
 
 def test_structured_calendar_assignments_reach_export_and_saved_course(
@@ -397,6 +419,84 @@ def test_guest_manual_extract_enables_ics_without_saving(tmp_path, monkeypatch):
     assert app.button(key="auth_dialog_google_sign_in").label == (
         "Sign in with Google"
     )
+
+
+def test_manual_extract_exception_keeps_form_without_partial_draft(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(database, "DATABASE_NAME", str(tmp_path / "guest.db"))
+    monkeypatch.setattr(
+        "syllasift.ui.imports.extract_deadlines",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("parser broke")),
+    )
+    app = AppTest.from_file("app.py")
+    app.session_state[AUTH_CHOICE_RESOLVED_KEY] = True
+    app = app.run(timeout=30)
+    app.text_input(key="manual_course_name").input("Biology")
+    app.text_area(key="manual_syllabus_text").input("Exam 13/45/2026")
+
+    app = next(
+        button for button in app.button if button.label == "Extract deadlines"
+    ).click().run(timeout=30)
+
+    assert not app.exception
+    assert any("Deadline extraction failed" in error.value for error in app.error)
+    assert "manual_import_draft" not in app.session_state
+
+
+def test_manual_extract_warns_for_bad_date_and_keeps_valid_deadline(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(database, "DATABASE_NAME", str(tmp_path / "guest.db"))
+    app = AppTest.from_file("app.py")
+    app.session_state[AUTH_CHOICE_RESOLVED_KEY] = True
+    app = app.run(timeout=30)
+    app.text_input(key="manual_course_name").input("Biology")
+    app.text_area(key="manual_syllabus_text").input(
+        "Exam 1 Sept 5\nExam 2 13/45/2026"
+    )
+
+    app = next(
+        button for button in app.button if button.label == "Extract deadlines"
+    ).click().run(timeout=30)
+
+    assert any("13/45/2026" in warning.value for warning in app.warning)
+    download = next(
+        item for item in app.get("download_button")
+        if item.label == "Download manual deadlines (.ics)"
+    )
+    assert not download.disabled
+
+
+def test_manual_save_exception_preserves_reviewed_draft(tmp_path, monkeypatch):
+    app = app_with_pending(tmp_path, monkeypatch, [], signed_in=True)
+    draft = {
+        "draft_id": "draft-id",
+        "course_name": "Biology",
+        "course_code": "BIO 101",
+        "semester": "Fall",
+        "year": 2026,
+        "warnings": [],
+        "deadlines": [{
+            "Item": "Exam",
+            "Date": "2026-09-05",
+            "Normalized Date": "2026-09-05",
+        }],
+    }
+    app.session_state["manual_import_draft"] = draft
+    monkeypatch.setattr(
+        "syllasift.ui.imports.upsert_course_with_deadlines",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("database busy")),
+    )
+    app = app.run(timeout=30)
+
+    app = next(
+        button for button in app.button if button.label == "Save manual course"
+    ).click().run(timeout=30)
+
+    assert not app.exception
+    assert app.session_state["manual_import_draft"] == draft
+    assert any("could not be saved" in error.value for error in app.error)
 
 
 def test_confirm_clear_uploads_preserves_saved_database(tmp_path, monkeypatch):

@@ -1,6 +1,10 @@
 import re
 
-from .dates import course_year_context
+from .dates import (
+    course_year_context,
+    find_invalid_date_texts,
+    invalid_date_warning,
+)
 from .classification import (
     candidate_is_duplicate,
     candidate_item_is_excluded,
@@ -53,13 +57,26 @@ def extract_deadline_review(document, course_year, semester=None):
         document_text = document.get("text", "") or "\n".join(
             page.get("text", "") for page in pages
         )
+    warning_parts = [document_text]
+    for page in pages:
+        for table in page.get("tables", []):
+            for row in table or []:
+                warning_parts.extend(str(cell) for cell in row or [] if cell)
+        warning_parts.extend(
+            str(word.get("text", ""))
+            for word in page.get("ocr_words", [])
+        )
     multiple, unresolved = extract_assessment_date_review(
         pages, document_text, course_year,
+    )
+    warning = invalid_date_warning(
+        find_invalid_date_texts("\n".join(warning_parts), course_year)
     )
     return {
         "candidates": candidates,
         "multiple_date_assessments": multiple,
         "unresolved_assessments": unresolved,
+        "warnings": [warning] if warning else [],
     }
 
 
@@ -173,7 +190,10 @@ def extract_deadline_candidates(document, course_year, semester=None):
             + table_deadlines
         )
         explicit_keys = {
-            (row["Item"].lower(), row["Normalized Date"])
+            (
+                clean_candidate_label(row["Item"]).lower(),
+                row["Normalized Date"],
+            )
             for row in strong_deadlines
         }
 

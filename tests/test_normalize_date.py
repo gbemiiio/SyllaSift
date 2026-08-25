@@ -1,3 +1,5 @@
+import pytest
+
 from parser import normalize_date
 
 
@@ -41,3 +43,16 @@ def test_month_date_with_existing_year():
         "March 20, 2027",
         2026,
     ) == "2027-03-20"
+
+
+def test_september_four_letter_abbreviation_is_supported():
+    assert normalize_date("Sept 5", 2026) == "2026-09-05"
+
+
+@pytest.mark.parametrize("date_text", ["13/45/2026", "February 30"])
+def test_invalid_dates_raise_sanitized_error(date_text):
+    with pytest.raises(
+        ValueError,
+        match=rf"^Invalid or unsupported date: {date_text}$",
+    ):
+        normalize_date(date_text, 2026)

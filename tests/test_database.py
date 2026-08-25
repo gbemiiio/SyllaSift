@@ -207,6 +207,24 @@ def test_reimport_merges_deadlines_and_preserves_completion(tmp_path, monkeypatc
     assert database.get_dashboard_stats(user_id) == (1, 2, 1)
 
 
+def test_legacy_save_helpers_are_idempotent(tmp_path, monkeypatch):
+    _, user_id, _ = initialized_database(tmp_path, monkeypatch)
+    first_course = database.save_course(
+        user_id, "Biology", "BIO-101", "Fall", 2026
+    )
+    second_course = database.save_course(
+        user_id, "Renamed Biology", "BIO 101", "fall", 2026
+    )
+    assert second_course == first_course
+
+    database.save_deadlines(user_id, first_course, [deadline("Exam")])
+    deadline_id = database.get_deadlines(user_id, first_course)[0][0]
+    assert database.update_deadline_status(user_id, deadline_id, True)
+    database.save_deadlines(user_id, first_course, [deadline(" exam ")])
+
+    assert database.get_dashboard_stats(user_id) == (1, 1, 1)
+
+
 def test_v1_migration_consolidates_owned_duplicates(tmp_path, monkeypatch):
     test_database, user_id, _ = initialized_database(tmp_path, monkeypatch)
     connection = sqlite3.connect(str(test_database))

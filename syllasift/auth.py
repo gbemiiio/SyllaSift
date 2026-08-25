@@ -105,7 +105,16 @@ def display_sign_in_dialog() -> None:
 
 
 def display_authentication() -> CurrentUser:
-    user = resolve_current_user()
+    try:
+        user = resolve_current_user()
+    except RuntimeError:
+        st.error(
+            "Sign-in could not be verified because the identity provider "
+            "did not return an account ID. Sign out and try again."
+        )
+        if st.button("Sign out and retry", key="invalid_identity_sign_out"):
+            st.logout()
+        return GUEST_USER
     if user.is_authenticated:
         st.session_state[AUTH_CHOICE_RESOLVED_KEY] = True
         st.session_state[AUTH_DIALOG_REQUESTED_KEY] = False

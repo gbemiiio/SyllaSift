@@ -263,7 +263,10 @@ def extract_whitespace_schedule_candidates(text, course_year):
 
         for item in items:
             if "due by" in lowered and "friday" in lowered:
-                normalized = friday_of_week(dates[0], course_year)
+                try:
+                    normalized = friday_of_week(dates[0], course_year)
+                except ValueError:
+                    continue
                 row = candidate_row(
                     item, normalized, course_year, "Medium",
                     "Weekday resolved from schedule week", True,

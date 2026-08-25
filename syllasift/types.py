@@ -39,6 +39,7 @@ class DeadlineReview(TypedDict):
     candidates: list["DeadlineCandidate"]
     multiple_date_assessments: list[MultipleDateAssessment]
     unresolved_assessments: list[UnresolvedAssessment]
+    warnings: list[str]
 
 
 DeadlineCandidate = TypedDict(

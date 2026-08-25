@@ -333,23 +333,10 @@ def get_or_create_user(auth_subject, email=None):
 
 
 def save_course(user_id, course_name, course_code, semester, year):
-    _require_user_id(user_id)
-    connection = get_connection()
-    try:
-        cursor = connection.execute(
-            """
-            INSERT INTO courses (
-                user_id, course_name, course_code, semester, year
-            )
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (user_id, course_name, course_code, semester, year),
-        )
-        course_id = cursor.lastrowid
-        connection.commit()
-        return course_id
-    finally:
-        connection.close()
+    result = upsert_course_with_deadlines(
+        user_id, course_name, course_code, semester, year, []
+    )
+    return result["course_id"]
 
 
 def save_deadlines(user_id, course_id, table_rows):
@@ -365,7 +352,7 @@ def save_deadlines(user_id, course_id, table_rows):
 
         connection.executemany(
             """
-            INSERT INTO deadlines (
+            INSERT OR IGNORE INTO deadlines (
                 user_id, course_id, item, raw_date, due_date,
                 is_completed, completed_at
             )

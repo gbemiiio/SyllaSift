@@ -175,7 +175,8 @@ def extract_table_deadlines(tables, course_year):
                         break
 
                 if len(row) > 2 and row[2]:
-                    topic = get_lines(row[2])[0]
+                    topic_lines = get_lines(row[2])
+                    topic = topic_lines[0] if topic_lines else ""
 
                 for deliverable in get_lines(deliverables):
                     if line_is_excluded(deliverable):

@@ -75,11 +75,53 @@ def test_noncontiguous_course_calendar_columns_do_not_mix_cells():
     ]
 
 
+def test_whitespace_only_deliverable_topic_does_not_crash():
+    document = {"text": "", "pages": [{"page": 1, "text": "", "tables": [[
+        ["Date", "Week", "Topic", "Deliverable"],
+        ["September 5", "2", "   ", "Exam 1 September 5"],
+    ]]}]}
+    rows = extract_deadline_candidates(document, 2026)
+    assert [(row["Item"], row["Normalized Date"]) for row in rows] == [
+        ("Exam 1", "2026-09-05")
+    ]
+
+
 def test_unlabeled_due_marker_is_visible_but_unchecked():
     rows = extract_deadline_candidates("Due: September 5", 2026)
     assert rows[0]["Item"] == "Unlabeled deadline"
     assert rows[0]["Confidence"] == "Low"
     assert rows[0]["Include"] is False
+
+
+def test_invalid_date_is_skipped_with_warning_while_valid_date_survives():
+    review = extract_deadline_review(
+        "Exam 1 September 5\nExam 2 13/45/2026", 2026
+    )
+    assert [(row["Item"], row["Normalized Date"]) for row in review["candidates"]] == [
+        ("Exam 1", "2026-09-05")
+    ]
+    assert review["warnings"] == [
+        'Skipped date text that could not be parsed: "13/45/2026".'
+    ]
+
+
+def test_explicit_ocr_label_keeps_high_confidence_after_cleanup():
+    def word(text, x0, top):
+        return {"text": text, "x0": x0, "top": top, "bottom": top + 8}
+
+    document = {"text": "", "pages": [{
+        "page": 1,
+        "text": "",
+        "tables": [],
+        "ocr_words": [
+            word("Work", 100, 10), word("Due Date", 300, 10),
+            word("M Exam", 100, 40), word("Sept 5", 300, 40),
+        ],
+    }]}
+    candidate = extract_deadline_candidates(document, 2026)[0]
+    assert candidate["Item"] == "Exam"
+    assert candidate["Confidence"] == "High"
+    assert candidate["Reason"] == "Explicit due date"
 
 
 def test_ordinary_deadline_lines():
@@ -308,6 +350,41 @@ def test_ocr_detection_requires_little_text_and_large_image():
     assert page_needs_ocr(large, "short")
     assert page_needs_ocr(large, "x" * 100)
     assert not page_needs_ocr(small, "short")
+
+
+@pytest.mark.parametrize("render_fails", [False, True])
+def test_ocr_pdfium_document_is_always_closed(monkeypatch, render_fails):
+    pdf_module = importlib.import_module("syllasift.parsing.pdf")
+    closed = []
+
+    class RenderedPage:
+        def render(self, scale):
+            if render_fails:
+                raise RuntimeError("render failed")
+            return SimpleNamespace(to_pil=lambda: "image")
+
+    class FakeDocument:
+        def __getitem__(self, _index):
+            return RenderedPage()
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(
+        pdf_module, "pdfium",
+        SimpleNamespace(PdfDocument=lambda _bytes: FakeDocument()),
+    )
+    monkeypatch.setattr(pdf_module, "np", SimpleNamespace(array=lambda image: image))
+    monkeypatch.setattr(
+        pdf_module, "get_ocr_engine",
+        lambda: (lambda _image: ([], None)),
+    )
+    if render_fails:
+        with pytest.raises(RuntimeError, match="render failed"):
+            pdf_module.extract_ocr_page(b"pdf", 0)
+    else:
+        assert pdf_module.extract_ocr_page(b"pdf", 0) == ("", [])
+    assert closed == [True]
 
 
 def test_pdfplumber_failure_falls_back_to_pypdf(monkeypatch):
@@ -598,6 +675,7 @@ def test_non_assessment_slash_dates_do_not_create_choices():
         "candidates": [],
         "multiple_date_assessments": [],
         "unresolved_assessments": [],
+        "warnings": [],
     }
 
 

@@ -40,6 +40,27 @@ def test_logged_in_identity_requires_stable_subject():
         })
 
 
+def test_display_authentication_recovers_missing_subject_as_guest(monkeypatch):
+    errors = []
+    logout_calls = []
+    monkeypatch.setattr(
+        auth,
+        "resolve_current_user",
+        lambda: (_ for _ in ()).throw(RuntimeError("missing subject")),
+    )
+    monkeypatch.setattr(auth.st, "error", errors.append)
+    monkeypatch.setattr(
+        auth.st, "button", lambda label, **kwargs: label == "Sign out and retry"
+    )
+    monkeypatch.setattr(auth.st, "logout", lambda: logout_calls.append(True))
+
+    user = auth.display_authentication()
+
+    assert user == auth.GUEST_USER
+    assert "identity provider" in errors[0]
+    assert logout_calls == [True]
+
+
 def test_guest_choice_and_dialog_request_update_session_state(monkeypatch):
     state = {}
     monkeypatch.setattr(auth.st, "session_state", state)

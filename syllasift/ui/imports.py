@@ -5,7 +5,12 @@ import streamlit as st
 
 from syllasift.auth import request_sign_in_dialog
 from syllasift.calendar.ics import build_ics_calendar
-from syllasift.parsing import extract_deadline_review, extract_deadlines
+from syllasift.parsing import (
+    extract_deadline_review,
+    extract_deadlines,
+    find_invalid_date_texts,
+    invalid_date_warning,
+)
 from syllasift.parsing.dates import course_year_context
 from syllasift.config import (
     NO_DATED_ASSIGNMENTS_MESSAGE,
@@ -117,12 +122,29 @@ def _render_pending_syllabus(syllabus):
                 key=f"year_{upload_id}",
             )
 
-        review = extract_deadline_review(
-            syllabus["document"], course_year_context(int(year), semester)
-        )
+        parser_error = ""
+        try:
+            review = extract_deadline_review(
+                syllabus["document"],
+                course_year_context(int(year), semester),
+            )
+        except Exception:
+            parser_error = (
+                "Deadline review failed for this syllabus. "
+                "Remove it and try a corrected PDF."
+            )
+            st.error(parser_error)
+            review = {
+                "candidates": [],
+                "multiple_date_assessments": [],
+                "unresolved_assessments": [],
+                "warnings": [],
+            }
         candidates = review["candidates"]
         multiple_date_assessments = review["multiple_date_assessments"]
         unresolved_assessments = review["unresolved_assessments"]
+        for warning in review.get("warnings", []):
+            st.warning(warning)
         for notice in syllabus["document"].get("notices", []):
             st.info(notice)
 
@@ -132,7 +154,7 @@ def _render_pending_syllabus(syllabus):
                 f"{reviewable_count} deadline(s) found. "
                 "Review or edit them before importing."
             )
-        elif not unresolved_assessments:
+        elif not unresolved_assessments and not parser_error:
             st.info(NO_DATED_ASSIGNMENTS_MESSAGE)
 
         if unresolved_assessments:
@@ -162,7 +184,7 @@ def _render_pending_syllabus(syllabus):
         )
 
         deadlines = []
-        review_errors = []
+        review_errors = [parser_error] if parser_error else []
         for row_number, row in edited.iterrows():
             if not bool(row.get("Include", False)):
                 continue
@@ -446,21 +468,36 @@ def display_manual_import(user) -> None:
             if not syllabus_text.strip():
                 st.error("Syllabus text is required.")
                 return
+            try:
+                deadlines = extract_deadlines(
+                    syllabus_text, int(course_year), semester
+                )
+                warning = invalid_date_warning(find_invalid_date_texts(
+                    syllabus_text, int(course_year), semester
+                ))
+            except Exception:
+                st.error(
+                    "Deadline extraction failed. Correct the syllabus text "
+                    "and try again."
+                )
+                return
             st.session_state["manual_import_draft"] = {
                 "draft_id": str(uuid.uuid4()),
                 "course_name": course_name.strip(),
                 "course_code": course_code.strip() or None,
                 "semester": semester,
                 "year": int(course_year),
-                "deadlines": extract_deadlines(
-                    syllabus_text, int(course_year), semester
-                ),
+                "deadlines": deadlines,
+                "warnings": [warning] if warning else [],
             }
             st.session_state.pop("manual_deadline_editor", None)
 
         draft = st.session_state.get("manual_import_draft")
         if not draft:
             return
+
+        for warning in draft.get("warnings", []):
+            st.warning(warning)
 
         st.caption(
             f"Review {len(draft['deadlines'])} extracted deadline(s) before "
@@ -520,14 +557,21 @@ def display_manual_import(user) -> None:
                 disabled=invalid_rows,
                 type="primary",
             ):
-                result = upsert_course_with_deadlines(
-                    user.user_id,
-                    draft["course_name"],
-                    draft["course_code"],
-                    draft["semester"],
-                    draft["year"],
-                    reviewed_deadlines,
-                )
+                try:
+                    result = upsert_course_with_deadlines(
+                        user.user_id,
+                        draft["course_name"],
+                        draft["course_code"],
+                        draft["semester"],
+                        draft["year"],
+                        reviewed_deadlines,
+                    )
+                except Exception:
+                    st.error(
+                        "The course could not be saved. Your reviewed "
+                        "deadlines are still available; please try again."
+                    )
+                    return
                 reset_deadline_and_export_state(st.session_state)
                 st.session_state.pop("manual_import_draft", None)
                 st.session_state["clear_manual_form_on_next_run"] = True
