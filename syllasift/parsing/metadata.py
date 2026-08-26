@@ -147,7 +147,8 @@ def looks_like_course_title(line):
         "syllabus", "instructor", "professor", "office hours", "email",
         "course description", "grading", "schedule", "semester",
         "department", "university", "college", "meeting time",
-        "meeting times", "course mode information",
+        "institute", "school of", "meeting times",
+        "course mode information",
     ]
     if any(word in lowered for word in rejected_words):
         return False
@@ -186,10 +187,17 @@ def detect_course_name(text, course_code=""):
             return clean_course_title(line)
     if course_code:
         normalized_code = re.sub(r"[\s\-]", "", course_code.upper())
+        code_line_indexes = []
         for index, line in enumerate(lines[:60]):
             normalized_line = re.sub(r"[\s\-]", "", line.upper())
             if normalized_code not in normalized_line:
                 continue
+            code_line_indexes.append(index)
+
+        # Prefer titles attached to any occurrence of the selected code before
+        # considering nearby header text such as an institution name.
+        for index in code_line_indexes:
+            line = lines[index]
             same_line_title = clean_course_title(re.sub(
                 COURSE_CODE_PATTERN, "", line, flags=re.IGNORECASE,
             ))
@@ -205,6 +213,8 @@ def detect_course_name(text, course_code=""):
                         if looks_like_course_title(combined):
                             return combined
                 return same_line_title
+
+        for index in code_line_indexes:
             for nearby_index in (index + 1, index - 1, index + 2):
                 if 0 <= nearby_index < len(lines):
                     candidate = clean_course_title(lines[nearby_index])

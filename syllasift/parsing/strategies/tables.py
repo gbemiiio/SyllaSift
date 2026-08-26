@@ -12,6 +12,77 @@ from ..common import append_deadline, get_lines
 from ..patterns import DATE_PATTERN, DAY_FIRST_DATE_PATTERN
 
 
+def _coalesce_fragmented_calendar_rows(table, date_index):
+    """Rebuild logical rows when PDF extraction splits one row vertically.
+
+    Some visually ordinary course calendars are emitted as several physical
+    rows (topic, date, and each assignment land on separate lines), with an
+    empty physical row between class meetings.  Joining each such block by
+    column restores the table the reader sees on the page.
+    """
+    body = list(table[1:])
+    if not any(
+        not any(str(cell or "").strip() for cell in row or [])
+        for row in body
+    ):
+        return table
+    nonempty_rows = [row for row in body if any(str(cell or "").strip() for cell in row or [])]
+    dated_rows = [
+        row for row in nonempty_rows
+        if date_index < len(row or [])
+        and re.search(DATE_PATTERN, str((row or [])[date_index] or ""), re.IGNORECASE)
+    ]
+    if not dated_rows or len(nonempty_rows) <= len(dated_rows) * 2:
+        return table
+
+    width = max((len(row or []) for row in table), default=0)
+    date_positions = [
+        position for position, row in enumerate(body)
+        if date_index < len(row or [])
+        and re.search(DATE_PATTERN, str((row or [])[date_index] or ""), re.IGNORECASE)
+    ]
+    grouped = {position: [] for position in date_positions}
+    for position, row in enumerate(body):
+        if not any(str(cell or "").strip() for cell in row or []):
+            continue
+        # PDF text is emitted top-to-bottom.  A fragment belongs to the
+        # visually nearest row carrying a date; ties favor the following date.
+        owner = min(date_positions, key=lambda anchor: (abs(anchor - position), -anchor))
+        grouped[owner].append(list(row or []))
+
+    logical_rows = [table[0]]
+    for anchor in date_positions:
+        logical_rows.append([
+            "\n".join(
+                str(row[index]).strip()
+                for row in grouped[anchor]
+                if index < len(row) and str(row[index] or "").strip()
+            )
+            for index in range(width)
+        ])
+    return logical_rows
+
+
+def _calendar_assignment_entries(text):
+    """Keep wrapped bullet text together while preserving separate bullets."""
+    lines = get_lines(text)
+    if not any(re.match(r"^\s*[§•]", line) for line in lines):
+        return lines
+
+    entries = []
+    current = []
+    for line in lines:
+        if re.match(r"^\s*[§•]", line):
+            if current:
+                entries.append(" ".join(current))
+            current = [re.sub(r"^\s*[§•]\s*", "", line)]
+        elif current:
+            current.append(line)
+    if current:
+        entries.append(" ".join(current))
+    return entries
+
+
 def extract_course_calendar_deadlines(tables, course_year):
     """Read authoritative Date / Topic / Assignment course calendars."""
     deadlines = []
@@ -28,18 +99,30 @@ def extract_course_calendar_deadlines(tables, course_year):
         ]
         topic_indexes = [
             index for index, header in enumerate(headers)
-            if header in {"topic", "topics"}
+            if header in {
+                "topic", "topics", "text", "description", "descriptions",
+            }
         ]
         assignment_indexes = [
             index for index, header in enumerate(headers)
-            if header in {"assignment", "assignments"}
+            if (
+                header in {"assignment", "assignments"}
+                or "due" in header
+            )
         ]
         if not date_indexes or not topic_indexes or not assignment_indexes:
             continue
 
         date_index = date_indexes[0]
-        topic_index = topic_indexes[0]
         assignment_index = assignment_indexes[0]
+        # "Due / Notes" is a mixed notes column where only explicit Due:
+        # entries count.  "Assignment Due" is instead an authoritative list
+        # of everything due for that class meeting.
+        due_notes_mode = (
+            "due" in headers[assignment_index]
+            and "assignment" not in headers[assignment_index]
+        )
+        table = _coalesce_fragmented_calendar_rows(table, date_index)
 
         def column_cell(cells, target_index):
             if target_index < len(cells) and cells[target_index]:
@@ -47,35 +130,133 @@ def extract_course_calendar_deadlines(tables, course_year):
             nearby = [
                 (abs(index - target_index), index, cell)
                 for index, cell in enumerate(cells)
-                if cell and abs(index - target_index) == 1
+                if (
+                    cell
+                    and abs(index - target_index) == 1
+                    and (index >= len(headers) or not headers[index])
+                )
             ]
             return min(nearby)[2] if nearby else ""
 
         for row in table[1:]:
             cells = [str(cell or "").strip() for cell in (row or [])]
             raw_date = column_cell(cells, date_index)
+            if re.search(
+                r"\b[A-Za-z]{3,9}\.?\s+\d{1,2}\s*[-–—]\s*\d{1,2}\b",
+                re.sub(r"\s+", " ", raw_date),
+                re.IGNORECASE,
+            ):
+                # A calendar span (for example, finals week) is not an exact
+                # deadline. Section-specific dates are extracted separately.
+                continue
             date_match = re.search(DATE_PATTERN, raw_date, re.IGNORECASE)
             raw_date = date_match.group() if date_match else ""
             if not raw_date:
                 continue
 
-            assignment_text = column_cell(cells, assignment_index)
-            for assignment in get_lines(assignment_text):
-                item = clean_explicit_item(assignment)
-                if item and not line_is_excluded(item):
-                    append_deadline(
-                        deadlines, seen, item, raw_date, course_year,
-                    )
-
-            topic_text = column_cell(cells, topic_index)
+            topic_parts = list(dict.fromkeys(
+                column_cell(cells, topic_index)
+                for topic_index in topic_indexes
+                if column_cell(cells, topic_index)
+            ))
+            topic_text = " ".join(topic_parts)
             item = clean_explicit_item(topic_text)
-            if scheduled_event_kind(item) == "exam":
+            presentation_match = re.search(
+                r"\bProject\s+Presentation\s*#?\s*(\d+)\b",
+                item,
+                re.IGNORECASE,
+            )
+            if presentation_match:
+                item = f"Project Presentation {presentation_match.group(1)}"
+            if scheduled_event_kind(item) and not line_is_excluded(item):
                 item = re.sub(r"\s*[–—]\s*", " - ", item)
                 append_deadline(
                     deadlines, seen, item, raw_date, course_year,
                 )
 
+            assignment_text = column_cell(cells, assignment_index)
+            for assignment in _calendar_assignment_entries(assignment_text):
+                if due_notes_mode:
+                    due_match = re.match(
+                        r"^\s*Due\s*:\s*(.+)$", assignment, re.IGNORECASE,
+                    )
+                    trailing_due = re.match(
+                        r"^(.+?)\s+due\s*[.]*$", assignment, re.IGNORECASE,
+                    )
+                    if due_match:
+                        assignment = due_match.group(1)
+                    elif trailing_due:
+                        assignment = trailing_due.group(1)
+                    else:
+                        continue
+                    item = clean_assignment_due_item(assignment, raw_date)
+                    if item.lower().startswith("project "):
+                        item = item.title()
+                else:
+                    item = clean_explicit_item(assignment)
+                if item and not line_is_excluded(item):
+                    append_deadline(
+                        deadlines, seen, item, raw_date, course_year,
+                    )
+
     return deadlines
+
+
+def enrich_course_calendar_tables(pages):
+    """Carry recognized course-calendar headers onto continuation pages."""
+    enriched = {}
+    active_headers = {}
+
+    for page_position, page in enumerate(pages):
+        page_tables = []
+        next_headers = {}
+        for table in page.get("tables", []):
+            table = table or []
+            width = max((len(row or []) for row in table), default=0)
+            first_row = list(table[0] or []) if table else []
+            headers = [str(cell or "").strip().lower() for cell in first_row]
+            has_date = any(header in {"date", "dates"} for header in headers)
+            has_due = any(
+                header in {"assignment", "assignments"} or "due" in header
+                for header in headers
+            )
+            has_topic = any(
+                header in {
+                    "topic", "topics", "text", "description", "descriptions",
+                }
+                for header in headers
+            )
+
+            if has_date and has_due and has_topic:
+                header = first_row
+                next_headers[width] = header
+                page_tables.append(table)
+            elif width in active_headers and table:
+                header = active_headers[width]
+                date_index = next(
+                    index for index, cell in enumerate(header)
+                    if str(cell or "").strip().lower() in {"date", "dates"}
+                )
+                contains_calendar_date = any(
+                    date_index < len(row or [])
+                    and re.search(
+                        DATE_PATTERN,
+                        str((row or [])[date_index] or ""),
+                        re.IGNORECASE,
+                    )
+                    for row in table
+                )
+                if contains_calendar_date:
+                    page_tables.append([header] + table)
+                    next_headers[width] = header
+                else:
+                    page_tables.append(table)
+            else:
+                page_tables.append(table)
+        enriched[page_position] = page_tables
+        active_headers = next_headers
+
+    return enriched
 
 
 def extract_assignment_due_table_deadlines(tables, course_year):

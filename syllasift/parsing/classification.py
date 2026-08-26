@@ -133,6 +133,11 @@ def clean_explicit_item(item):
 def scheduled_event_kind(item):
     lowered = item.lower().strip()
 
+    if re.search(r"\bno\s+(?:final\s+)?exam\b", lowered):
+        return ""
+    if re.search(r"\bexam\s*#?\s*\d+\s+review\b", lowered):
+        return ""
+
     if any(
         excluded in lowered
         for excluded in (

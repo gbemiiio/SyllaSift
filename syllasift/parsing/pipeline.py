@@ -25,6 +25,7 @@ from .strategies.schedules import (
 )
 from .strategies.tables import (
     enrich_calendar_tables,
+    enrich_course_calendar_tables,
     extract_assignment_due_table_deadlines,
     extract_calendar_table_deadlines,
     extract_course_calendar_deadlines,
@@ -91,6 +92,7 @@ def extract_deadline_candidates(document, course_year, semester=None):
     candidates = []
     seen = set()
     calendar_tables_by_page = enrich_calendar_tables(pages)
+    course_tables_by_page = enrich_course_calendar_tables(pages)
 
     for page_position, page in enumerate(pages):
         page_number = page.get("page")
@@ -110,7 +112,7 @@ def extract_deadline_candidates(document, course_year, semester=None):
             course_year,
         )
         course_calendar_deadlines = extract_course_calendar_deadlines(
-            tables,
+            course_tables_by_page.get(page_position, tables),
             course_year,
         )
         event_table_deadlines = extract_date_topic_table_events(

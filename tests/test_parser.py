@@ -63,6 +63,17 @@ def test_metadata_ignores_contextual_codes_and_accepts_year_first_term():
     assert metadata["year"] == 2019
 
 
+def test_course_title_prefers_later_same_line_code_over_institution_header():
+    text = """
+    MGT 4058 Fall 2026
+    Scheller College of Business
+    Georgia Institute of Technology
+    Database Management (MGT 4058)
+    Fall 2026
+    """
+    assert detect_course_metadata(text)["course_name"] == "Database Management"
+
+
 def test_noncontiguous_course_calendar_columns_do_not_mix_cells():
     document = {"text": "", "pages": [{"page": 1, "text": "", "tables": [[
         ["Date", "Week", "Topic", "Notes", "Assignment"],
@@ -73,6 +84,57 @@ def test_noncontiguous_course_calendar_columns_do_not_mix_cells():
         ("Exam 1", "2026-09-05"),
         ("Homework 1", "2026-09-05"),
     ]
+
+
+def test_due_notes_calendar_and_headerless_continuation_are_structured():
+    first_page = [
+        ["Week", "Date", "Text", "Descriptions", "Due / Notes"],
+        ["2", "9/1", "Ch. 2", "Entity-Relationship Modeling", "Post: HW1"],
+        ["2", "9/3", "Ch. 2", "Entity-Relationship Modeling", "Start: Project team formation"],
+        ["3", "9/10", "", "Entity-Relationship Modeling", "Due: Project team formation"],
+        ["4", "9/15", "Ch. 3", "Relational Database", "Due: HW1"],
+        ["6", "10/1", "Ch. 4", "Normalization 2", "Due: Project Deliverable 1"],
+    ]
+    continuation = [
+        ["8", "10/13", "", "Exam 1 Review", "Due: HW2"],
+        ["8", "10/15", "", "Exam 1", "Post: HW3"],
+        ["10", "10/29", "Ch. 5", "SQL 4", "Due: Project Deliverable 2"],
+        ["12", "11/10", "", "Exam 2 Review", "Due: HW3"],
+        ["12", "11/12", "", "Exam 2", ""],
+        ["15", "12/1", "", "Project Presentation 1\n(five teams)", "Project presentation slides due"],
+        ["15", "11/27", "", "Project Presentation 1\n(five teams)", ""],
+        ["16", "12/3", "", "Project Presentation 3 (if\nneed ed)", ""],
+        ["16", "12/6", "", "(No final exam)", "Due: Project Deliverable 3"],
+    ]
+    document = {
+        "text": "",
+        "pages": [
+            {"page": 6, "text": "3 9/10 Entity Modeling Due: Project team formation", "tables": [first_page]},
+            {"page": 7, "text": "8 10/13 Exam 1 Review Due: HW2\n16 12/6 (No final exam) Due: Project Deliverable 3", "tables": [continuation]},
+        ],
+    }
+
+    candidates = extract_deadline_candidates(document, 2026)
+
+    assert [(row["Item"], row["Normalized Date"]) for row in candidates] == [
+        ("Project Team Formation", "2026-09-10"),
+        ("HW1", "2026-09-15"),
+        ("Project Deliverable 1", "2026-10-01"),
+        ("HW2", "2026-10-13"),
+        ("Exam 1", "2026-10-15"),
+        ("Project Deliverable 2", "2026-10-29"),
+        ("HW3", "2026-11-10"),
+        ("Exam 2", "2026-11-12"),
+        ("Project Presentation 1", "2026-11-27"),
+        ("Project Presentation 1", "2026-12-01"),
+        ("Project Presentation Slides", "2026-12-01"),
+        ("Project Presentation 3", "2026-12-03"),
+        ("Project Deliverable 3", "2026-12-06"),
+    ]
+    assert all(row["Confidence"] == "High" for row in candidates)
+    labels = {row["Item"] for row in candidates}
+    assert "Final Exam" not in labels
+    assert not any("Review" in label or label[:1].isdigit() for label in labels)
 
 
 def test_whitespace_only_deliverable_topic_does_not_crash():
@@ -729,6 +791,59 @@ def test_three_column_course_calendar_extracts_assignments_and_exams():
     assert "Optional Make-Up Exam" not in {
         row["Item"] for row in candidates
     }
+
+
+def test_fragmented_assignment_due_calendar_rebuilds_wrapped_rows_and_pages():
+    header_page = [[
+        ["DAY", "DATE", "TOPIC", "ASSIGNMENT DUE"],
+        ["", "", "", ""],
+        [None, None, "Human Behavior & Processes:",
+         "§ Watch Ted Talk | Susan Cain: The Power of Introverts [18 min]"],
+        ["Wednesday", "Aug 26", None, None],
+        [None, None, "Personality & Values", "§ Complete Quiz 1"],
+        ["", "", "", ""],
+        [None, None, None, "§ Listen: Freakonomics | How to Be Less Terrible"],
+        ["Wednesday", "Sept 2", "Attribution & Decision Making", None],
+        [None, None, None, "at Predicting the Future [52 min]"],
+    ]]
+    continuation_page = [[
+        ["", "", "", ""],
+        [None, None, None, "§ Read ‘Using Stretch Goals To Promote Organizational"],
+        ["Monday", "Sept 28", "Goal Setting Theory", None],
+        [None, None, None, "Effectiveness And Personal Growth’"],
+        [None, None, None, "§ Complete Quiz 3"],
+    ]]
+    document = {"text": "", "pages": [
+        {"page": 11, "text": "", "tables": header_page, "source": "text"},
+        {"page": 12, "text": "", "tables": continuation_page, "source": "text"},
+    ]}
+
+    candidates = extract_deadline_candidates(document, 2026)
+
+    assert [(row["Item"], row["Normalized Date"]) for row in candidates] == [
+        ("Watch Ted Talk | Susan Cain: The Power of Introverts [18 min]", "2026-08-26"),
+        ("Complete Quiz 1", "2026-08-26"),
+        ("Listen: Freakonomics | How to Be Less Terrible at Predicting the Future [52 min]", "2026-09-02"),
+        ("Read ‘Using Stretch Goals To Promote Organizational Effectiveness And Personal Growth’", "2026-09-28"),
+        ("Complete Quiz 3", "2026-09-28"),
+    ]
+
+
+def test_section_first_final_exam_schedule_uses_exact_section_dates():
+    text = (
+        "Final Dec 10-17 FINAL EXAM "
+        "Section A: Wednesday, Dec 16 at 8:00AM-10:50AM "
+        "Section B: Wednesday, Dec 16 at 11:20AM-2:10PM "
+        "Section C: Friday, Dec 11 at 2:40PM-5:30PM"
+    )
+
+    candidates = extract_deadline_candidates(text, 2026)
+
+    assert [(row["Item"], row["Normalized Date"]) for row in candidates] == [
+        ("Final Exam - Section C", "2026-12-11"),
+        ("Final Exam - Section A", "2026-12-16"),
+        ("Final Exam - Section B", "2026-12-16"),
+    ]
 
 
 @pytest.mark.parametrize("day,date", [("F", "11-Oct"), ("M", "4-Nov")])

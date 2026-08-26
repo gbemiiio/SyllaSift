@@ -70,6 +70,21 @@ def extract_section_final_candidates(text, course_year):
     compact = re.sub(r"\s+", " ", text)
 
     for match in re.finditer(
+        rf"Section\s+([A-Z0-9]+)\s*:\s*(?:{WEEKDAY_PATTERN})\s*,?\s*"
+        rf"({DATE_PATTERN})",
+        compact,
+        re.IGNORECASE,
+    ):
+        row = candidate_row(
+            f"Final Exam - Section {match.group(1).upper()}",
+            match.group(2),
+            course_year,
+        )
+        if row and (row["Item"], row["Normalized Date"]) not in seen:
+            seen.add((row["Item"], row["Normalized Date"]))
+            rows.append(row)
+
+    for match in re.finditer(
         rf"({DATE_PATTERN}).{{0,100}}?for\s+Section\s+([A-Z0-9]+)",
         compact,
         re.IGNORECASE,
