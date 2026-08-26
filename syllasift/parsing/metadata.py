@@ -15,12 +15,7 @@ def detect_platform_notices(text):
         "see course assignments for additional instructions",
         "about one per week",
     )
-    recurring_platform_work = bool(re.search(
-        r"(?:weekly\s+homework|homework assignments?).{0,100}"
-        r"(?:canvas|learning catalytics|webwork|mylab|mystatlab|launchpad)",
-        compact,
-    ))
-    if not recurring_platform_work and not any(
+    if not any(
         signal in compact for signal in signals
     ):
         return []
@@ -115,6 +110,10 @@ def clean_course_title(title):
         r"^Syllabus\s+for\s+the\s+", "", title, flags=re.IGNORECASE,
     )
     title = re.sub(
+        r"^THE\s+STUDENT\s+GUIDE\s+TO(?:\s+|$)", "", title,
+        flags=re.IGNORECASE,
+    )
+    title = re.sub(
         r"\(?\b(?:Spring|Summer|Fall|Autumn|Winter)\s+20\d{2}\b\)?",
         "", title, flags=re.IGNORECASE,
     )
@@ -201,6 +200,10 @@ def detect_course_name(text, course_code=""):
             same_line_title = clean_course_title(re.sub(
                 COURSE_CODE_PATTERN, "", line, flags=re.IGNORECASE,
             ))
+            if not same_line_title and index + 1 < len(lines):
+                continuation = clean_course_title(lines[index + 1])
+                if looks_like_course_title(continuation):
+                    return continuation
             if looks_like_course_title(same_line_title):
                 if index + 1 < len(lines):
                     continuation = clean_course_title(lines[index + 1])

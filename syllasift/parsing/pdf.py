@@ -1,4 +1,5 @@
 import io
+import re
 
 from pypdf import PdfReader
 
@@ -20,6 +21,70 @@ except ImportError:
 
 
 _OCR_ENGINE = None
+
+
+def _extract_headerless_schedule_table(page, page_text, tables):
+    """Recover the first row of a schedule continued across a page break.
+
+    Word-generated PDFs may omit the top border of the first continuation row.
+    The default line-based table extractor then starts at row two. A text-based
+    horizontal pass retains that first row and the five columns needed for
+    deadline extraction.
+    """
+    if not tables or max((len(row or []) for row in tables[0]), default=0) < 6:
+        return None
+    first_row = tables[0][0] if tables[0] else []
+    if any(str(cell or "").strip().lower() == "date" for cell in first_row or []):
+        return None
+    schedule_rows = re.findall(
+        r"(?m)^\s*(?:\d+\s+)?\d{1,2}/\d{1,2}\s+"
+        r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b",
+        page_text,
+        re.IGNORECASE,
+    )
+    if len(schedule_rows) < 3:
+        return None
+    fallback_tables = page.extract_tables({
+        "vertical_strategy": "lines",
+        "horizontal_strategy": "text",
+        "min_words_horizontal": 1,
+    }) or []
+    fallback = next(
+        (
+            table for table in fallback_tables
+            if max((len(row or []) for row in table), default=0) == 5
+        ),
+        None,
+    )
+    if not fallback:
+        return None
+    default_first_date = next(
+        (
+            match.group()
+            for row in tables[0]
+            for cell in row or []
+            if cell
+            for match in [re.search(r"\b\d{1,2}/\d{1,2}\b", str(cell))]
+            if match
+        ),
+        "",
+    )
+    if not default_first_date:
+        return None
+    cutoff = next(
+        (
+            index for index, row in enumerate(fallback)
+            if any(default_first_date in str(cell or "") for cell in row or [])
+        ),
+        len(fallback),
+    )
+    fallback = fallback[:cutoff]
+    if not fallback:
+        return None
+    return [[
+        "Date", "Day", "Lesson prep", "In-Class Topic",
+        "Homework (HW), In class (IC), (PMIP) or (AC) reports due",
+    ]] + fallback
 
 
 def get_ocr_engine():
@@ -94,6 +159,11 @@ def extract_pdf_document(uploaded_file):
                     native_text = page.extract_text() or ""
                     page_text = native_text
                     tables = page.extract_tables() or []
+                    continuation_table = _extract_headerless_schedule_table(
+                        page, native_text, tables,
+                    )
+                    if continuation_table:
+                        tables.append(continuation_table)
                     source = "text"
                     ocr_words = []
 

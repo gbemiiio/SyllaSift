@@ -13,6 +13,7 @@ from parser import (
     normalize_date,
     page_needs_ocr,
 )
+from syllasift.parsing.pdf import _extract_headerless_schedule_table
 
 
 @pytest.mark.parametrize(
@@ -846,6 +847,171 @@ def test_section_first_final_exam_schedule_uses_exact_section_dates():
     ]
 
 
+def test_compound_due_schedule_extracts_only_due_work_and_explicit_exam():
+    header = [
+        "Class #", "Date", "Day", "Lesson prep", "In-Class Topic",
+        "Homework (HW), In class (IC), (PMIP) or (AC) reports due", "Notes",
+    ]
+    document = {"text": "", "pages": [{
+        "page": 18,
+        "source": "text",
+        "text": "",
+        "tables": [[
+            header,
+            ["7", "9/15", "Tue", "Scrum Guide - Pgs. 1-7",
+             "Adaptive and Scrum Projects",
+             "PMIP project\ncharter (PMIP)\nProject methodology for 2-\nhour house (IC)", ""],
+            ["11", "9/29", "Tue", "(KC) Communication Failures",
+             "Project communications",
+             "Kerzner case discussion questions (IC)\nPMIP status report 1 (PMIP)\nPMIP Interview List (PMIP)", ""],
+            ["12", "10/1", "Thu", "Midterm Exam", "", "",
+             "In class with Digital Proctoring"],
+            ["26", "12/1", "Tue", "In class team presentations",
+             "PMIP Team Presentations",
+             "PMIP Project report and presentations (PMIP)\nGuest speaker assignment (HW)", ""],
+        ]],
+    }]}
+
+    candidates = extract_deadline_candidates(document, 2026)
+
+    assert [(row["Item"], row["Normalized Date"]) for row in candidates] == [
+        ("PMIP project charter (PMIP)", "2026-09-15"),
+        ("Project methodology for 2-hour house (IC)", "2026-09-15"),
+        ("Kerzner case discussion questions (IC)", "2026-09-29"),
+        ("PMIP status report 1 (PMIP)", "2026-09-29"),
+        ("PMIP Interview List (PMIP)", "2026-09-29"),
+        ("Midterm Exam", "2026-10-01"),
+        ("PMIP Project report and presentations (PMIP)", "2026-12-01"),
+        ("Guest speaker assignment (HW)", "2026-12-01"),
+    ]
+
+
+def test_mgt4450_compound_due_calendar_has_all_30_authoritative_items():
+    header = [
+        "Class #", "Date", "Day", "Lesson prep", "In-Class Topic",
+        "Homework (HW), In class (IC), (PMIP) or (AC) reports due", "Notes",
+    ]
+    schedule = [
+        ("8/27", "", "Empire State Building Case (IC)"),
+        ("9/1", "", "Elevator speech including background information (HW)\nAcadia Name (IC)"),
+        ("9/3", "", "Acadia Scope (IC)"),
+        ("9/8", "", "WBS Reunion (IC)\nSS Tutorial assignment (PMIP)"),
+        ("9/10", "", "PMIP team roster (PMIP)"),
+        ("9/15", "", "PMIP project charter (PMIP)\nProject methodology for 2-hour house (IC)"),
+        ("9/17", "", "Kerzner Agile/Scrum role (IC)"),
+        ("9/22", "", "PMIP WBS (PMIP)"),
+        ("9/24", "", "Acadia Portfolio criteria (HW)\nAcadia Stakeholder Management (IC)"),
+        ("9/29", "", "Kerzner case discussion questions (IC)\nPMIP status report 1 (PMIP)\nPMIP Interview List (PMIP)"),
+        ("10/1", "Midterm Exam", ""),
+        ("10/13", "", "Falls Engineering discussion questions (HW)"),
+        ("10/15", "", "PMIP status report 2 (PMIP)"),
+        ("10/20", "", "RACI for Acadia Analysis Phase (HW)"),
+        ("10/22", "", "Network diagram Acadia development timeline (HW)"),
+        ("10/27", "", "Kerzner Estimating Problem (HW)"),
+        ("10/29", "", "Acadia final report and presentation (AC)"),
+        ("11/3", "", "Acadia peer participation survey (AC)\nMacon Inc. Risk register (HW)"),
+        ("11/12", "", "PMIP project status report 3 (PMIP)"),
+        ("11/17", "", "EVA analysis (HW)"),
+        ("12/1", "In class team presentations", "PMIP Project report and presentations (PMIP)\nGuest speaker assignment (HW)"),
+        ("12/8", "In class team presentations", "PMIP Project participation survey (PMIP)"),
+    ]
+    table = [header] + [
+        [str(index), date, "Tue", prep, "Ordinary class topic", due, ""]
+        for index, (date, prep, due) in enumerate(schedule, start=1)
+    ]
+    document = {"text": "", "pages": [{
+        "page": 17, "source": "text", "text": "", "tables": [table],
+    }]}
+
+    candidates = extract_deadline_candidates(document, 2026)
+
+    expected = {
+        ("Empire State Building Case (IC)", "2026-08-27"),
+        ("Elevator speech including background information (HW)", "2026-09-01"),
+        ("Acadia Name (IC)", "2026-09-01"),
+        ("Acadia Scope (IC)", "2026-09-03"),
+        ("WBS Reunion (IC)", "2026-09-08"),
+        ("SS Tutorial assignment (PMIP)", "2026-09-08"),
+        ("PMIP team roster (PMIP)", "2026-09-10"),
+        ("PMIP project charter (PMIP)", "2026-09-15"),
+        ("Project methodology for 2-hour house (IC)", "2026-09-15"),
+        ("Kerzner Agile/Scrum role (IC)", "2026-09-17"),
+        ("PMIP WBS (PMIP)", "2026-09-22"),
+        ("Acadia Portfolio criteria (HW)", "2026-09-24"),
+        ("Acadia Stakeholder Management (IC)", "2026-09-24"),
+        ("Kerzner case discussion questions (IC)", "2026-09-29"),
+        ("PMIP status report 1 (PMIP)", "2026-09-29"),
+        ("PMIP Interview List (PMIP)", "2026-09-29"),
+        ("Midterm Exam", "2026-10-01"),
+        ("Falls Engineering discussion questions (HW)", "2026-10-13"),
+        ("PMIP status report 2 (PMIP)", "2026-10-15"),
+        ("RACI for Acadia Analysis Phase (HW)", "2026-10-20"),
+        ("Network diagram Acadia development timeline (HW)", "2026-10-22"),
+        ("Kerzner Estimating Problem (HW)", "2026-10-27"),
+        ("Acadia final report and presentation (AC)", "2026-10-29"),
+        ("Acadia peer participation survey (AC)", "2026-11-03"),
+        ("Macon Inc. Risk register (HW)", "2026-11-03"),
+        ("PMIP project status report 3 (PMIP)", "2026-11-12"),
+        ("EVA analysis (HW)", "2026-11-17"),
+        ("PMIP Project report and presentations (PMIP)", "2026-12-01"),
+        ("Guest speaker assignment (HW)", "2026-12-01"),
+        ("PMIP Project participation survey (PMIP)", "2026-12-08"),
+    }
+    actual = {(row["Item"], row["Normalized Date"]) for row in candidates}
+    assert len(candidates) == 30
+    assert actual == expected
+
+
+def test_headerless_schedule_fallback_keeps_only_missing_boundary_row():
+    class FakePage:
+        def extract_tables(self, settings):
+            return [[
+                ["", "", "", "", "PMIP project"],
+                ["", "", "", "", "charter (PMIP)"],
+                ["9/15", "Tue", "Scrum Guide", "Adaptive Projects", "Project"],
+                ["", "", "", "", "methodology for 2-hour house (IC)"],
+                ["9/17", "Thu", "Scrum Guide", "Scrum Projects", "Kerzner role (IC)"],
+            ]]
+
+    default_table = [[
+        ["8", "9/17", "Thu", "Scrum Guide", "Scrum Projects", "Kerzner role (IC)", ""],
+        ["9", "9/22", "Tue", "Acadia Case", "Portfolio", "PMIP WBS (PMIP)", ""],
+        ["10", "9/24", "Thu", "Acadia Case", "Stakeholders", "Criteria (HW)", ""],
+    ]]
+    page_text = "7 9/15 Tue\n8 9/17 Thu\n9 9/22 Tue\n10 9/24 Thu"
+
+    fallback = _extract_headerless_schedule_table(
+        FakePage(), page_text, default_table,
+    )
+
+    assert fallback[0][0] == "Date"
+    assert any("9/15" in str(cell) for row in fallback for cell in row)
+    assert not any("9/17" in str(cell) for row in fallback for cell in row)
+
+
+def test_tbd_final_is_unresolved_and_not_a_dated_candidate():
+    document = {"text": "", "pages": [{
+        "page": 19,
+        "source": "text",
+        "text": "",
+        "tables": [[
+            ["Class #", "Date", "Lesson prep", "In-Class Topic"],
+            ["28", "TBD", "Final Exam", "Final Exam"],
+        ]],
+    }]}
+
+    review = extract_deadline_review(document, 2026)
+
+    assert review["candidates"] == []
+    assert review["unresolved_assessments"] == [{
+        "item": "Final Exam",
+        "date_range": "TBD",
+        "page": 19,
+        "source": "TEXT",
+        "message": "An exact deadline is not provided for this assessment. Check Canvas.",
+    }]
+
+
 @pytest.mark.parametrize("day,date", [("F", "11-Oct"), ("M", "4-Nov")])
 def test_schedule_weekday_and_topic_details_are_cleaned(day, date):
     document = {"text": "", "pages": [{"page": 6, "text": "", "tables": [[
@@ -983,6 +1149,9 @@ def test_course_title_suffixes_are_removed_without_course_specific_rules():
         "MGT 2250 Syllabus\nManagement Statistics, Section O, 3 Credits\n"
         "Summer 2026"
     )["course_name"] == "Management Statistics"
+    assert detect_course_metadata(
+        "THE STUDENT GUIDE TO MGT 4450\nPROJECT MANAGEMENT\n2026 Fall Term"
+    )["course_name"] == "Project Management"
 
 
 def test_platform_notice_names_the_relevant_services():
@@ -995,6 +1164,13 @@ def test_platform_notice_names_the_relevant_services():
         "Some assignment dates are maintained in Canvas and MyLab Statistics. "
         "Add them manually when they become available."
     ]
+
+
+def test_canvas_material_and_submission_references_do_not_warn_about_dates():
+    assert detect_platform_notices(
+        "Homework assignments may be based on the case material available in Canvas. "
+        "Homework files may be submitted multiple times in Canvas until the cut-off time."
+    ) == []
 
 
 def test_document_wide_candidates_recover_page_provenance():

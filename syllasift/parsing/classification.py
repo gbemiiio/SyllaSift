@@ -119,6 +119,8 @@ def clean_explicit_item(item):
     item = re.sub(r"\brelease\s*:\s*", "", item, flags=re.IGNORECASE)
     item = re.sub(r"\(\s*$", "", item)
     item = re.sub(r"\(\s*:\s*\)", "", item)
+    item = re.sub(r"\br\s+egister\b", "register", item, flags=re.IGNORECASE)
+    item = re.sub(r"(?<=\d)-\s+(?=[A-Za-z])", "-", item)
     item = re.sub(
         r"^\d{1,2}:\d{2}\s*(?:AM|PM)\s*[-–—]\s*"
         r"\d{1,2}:\d{2}\s*(?:AM|PM)\s*",

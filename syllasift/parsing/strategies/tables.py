@@ -83,6 +83,19 @@ def _calendar_assignment_entries(text):
     return entries
 
 
+def _marked_due_entries(text):
+    """Split a compound due cell at its HW/IC/PMIP/AC markers."""
+    compact = re.sub(r"\s+", " ", text).strip()
+    matches = list(re.finditer(
+        r".+?\((?:HW|IC|PMIP|AC)\)",
+        compact,
+        re.IGNORECASE,
+    ))
+    if not matches:
+        return _calendar_assignment_entries(text)
+    return [match.group().strip() for match in matches]
+
+
 def extract_course_calendar_deadlines(tables, course_year):
     """Read authoritative Date / Topic / Assignment course calendars."""
     deadlines = []
@@ -99,9 +112,12 @@ def extract_course_calendar_deadlines(tables, course_year):
         ]
         topic_indexes = [
             index for index, header in enumerate(headers)
-            if header in {
-                "topic", "topics", "text", "description", "descriptions",
-            }
+            if (
+                header in {
+                    "topic", "topics", "text", "description", "descriptions",
+                }
+                or "topic" in header
+            )
         ]
         assignment_indexes = [
             index for index, header in enumerate(headers)
@@ -115,13 +131,15 @@ def extract_course_calendar_deadlines(tables, course_year):
 
         date_index = date_indexes[0]
         assignment_index = assignment_indexes[0]
+        compound_due_mode = bool(re.search(
+            r"\b(?:HW|IC|PMIP|AC)\b|reports?\s+due",
+            headers[assignment_index],
+            re.IGNORECASE,
+        ))
         # "Due / Notes" is a mixed notes column where only explicit Due:
         # entries count.  "Assignment Due" is instead an authoritative list
         # of everything due for that class meeting.
-        due_notes_mode = (
-            "due" in headers[assignment_index]
-            and "assignment" not in headers[assignment_index]
-        )
+        due_notes_mode = "notes" in headers[assignment_index]
         table = _coalesce_fragmented_calendar_rows(table, date_index)
 
         def column_cell(cells, target_index):
@@ -168,14 +186,37 @@ def extract_course_calendar_deadlines(tables, course_year):
             )
             if presentation_match:
                 item = f"Project Presentation {presentation_match.group(1)}"
-            if scheduled_event_kind(item) and not line_is_excluded(item):
+            if (
+                not compound_due_mode
+                and scheduled_event_kind(item)
+                and not line_is_excluded(item)
+            ):
                 item = re.sub(r"\s*[–—]\s*", " - ", item)
                 append_deadline(
                     deadlines, seen, item, raw_date, course_year,
                 )
 
+            # Exams sometimes appear in a lesson-prep column rather than the
+            # topic column. Only assessment-like scheduled events are admitted.
+            for index, header in enumerate(headers):
+                if "lesson prep" not in header or index >= len(cells):
+                    continue
+                prep_item = clean_explicit_item(cells[index])
+                if (
+                    re.match(
+                        r"^(?:Exam|Test|Quiz|Midterm|Final)\b",
+                        prep_item,
+                        re.IGNORECASE,
+                    )
+                    and scheduled_event_kind(prep_item)
+                    and not line_is_excluded(prep_item)
+                ):
+                    append_deadline(
+                        deadlines, seen, prep_item, raw_date, course_year,
+                    )
+
             assignment_text = column_cell(cells, assignment_index)
-            for assignment in _calendar_assignment_entries(assignment_text):
+            for assignment in _marked_due_entries(assignment_text):
                 if due_notes_mode:
                     due_match = re.match(
                         r"^\s*Due\s*:\s*(.+)$", assignment, re.IGNORECASE,
@@ -224,6 +265,7 @@ def enrich_course_calendar_tables(pages):
                 header in {
                     "topic", "topics", "text", "description", "descriptions",
                 }
+                or "topic" in header
                 for header in headers
             )
 

@@ -120,6 +120,26 @@ def extract_assessment_date_review(pages, document_text, course_year):
                         page.get("source", "text").upper(),
                     )
 
+
+    # A structured schedule may explicitly leave an assessment date
+    # undecided. Keep it visible in review without inventing a date.
+    for page in pages:
+        for table in page.get("tables", []):
+            for row in table or []:
+                cells = [str(cell or "").strip() for cell in row or []]
+                if not any(
+                    re.fullmatch(r"(?:TBD|TBA|To be determined)", cell, re.IGNORECASE)
+                    for cell in cells
+                ):
+                    continue
+                for cell in cells:
+                    item = _assessment_label(cell)
+                    if item:
+                        add_unresolved(
+                            item, "TBD", page.get("page"),
+                            page.get("source", "text").upper(),
+                        )
+
     # Handle outline sections where assessments are listed beneath a module
     # date range, possibly across a PDF page break.
     module_heading = re.compile(
